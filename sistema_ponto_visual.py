@@ -25,6 +25,8 @@ from collections import defaultdict
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
+import csv
+from openpyxl import Workbook
 
 # --- CONFIGURAÇÃO VISUAL ---
 ctk.set_appearance_mode("Dark")
@@ -54,14 +56,14 @@ ARQUIVO_CONFIG = "config.json"
 class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         super().__init__()
-        
+
         # Inicializa Drag & Drop
         self.TkdndVersion = TkinterDnD._require(self)
-        
+
         self.title("Sistema Ponto Neural v16.2 - Estável")
         self.geometry("1200x850")
         self.configure(fg_color=COLOR_BG)
-        
+
         # Tenta carregar o ícone (se existir)
         try:
             self.iconbitmap("icone.ico")
@@ -72,11 +74,11 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         self.parar_execucao = False
         self.queue = queue.Queue()
         self.after(100, self.verificar_fila)
-        
+
         self.temp_dir = None
         self.pasta_funcionarios = "funcionarios"
         if not os.path.exists(self.pasta_funcionarios): os.makedirs(self.pasta_funcionarios)
-        
+
         self.dados_consolidados = []
         self.caminho_zip = ""
         self.conhecidos_nom = []
@@ -84,12 +86,14 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         # --- ABAS ---
         self.tabview = ctk.CTkTabview(self, fg_color="transparent")
         self.tabview.pack(fill="both", expand=True, padx=20, pady=10)
-        
+
         self.tab_process = self.tabview.add(" 🚀 Processamento ")
         self.tab_func = self.tabview.add(" 👥 Funcionários ")
-        
+        self.tab_relatorios = self.tabview.add(" 📊 Relatórios ")
+
         self.setup_tab_processamento()
         self.setup_tab_funcionarios()
+        self.setup_tab_relatorios()
 
     # ==========================================
     # ABA 1: PROCESSAMENTO
@@ -107,14 +111,14 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         # ESQUERDA
         frame_left = ctk.CTkFrame(frame, fg_color=COLOR_CARD, corner_radius=15, border_color=COLOR_BORDER, border_width=1)
         frame_left.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=10)
-        
+
         # Datas
         self.create_section_label(frame_left, "1. PERÍODO")
         frame_datas = ctk.CTkFrame(frame_left, fg_color="transparent")
         frame_datas.pack(fill="x", padx=20)
-        
+
         style_cal = {'background': '#1e293b', 'foreground': 'white', 'borderwidth': 0, 'date_pattern': 'dd/mm/yyyy'}
-        
+
         ctk.CTkLabel(frame_datas, text="De:", text_color=COLOR_TEXT_DIM).grid(row=0, column=0, sticky="w")
         self.cal_inicio = DateEntry(frame_datas, width=12, font=("Arial", 11), **style_cal)
         self.cal_inicio.set_date(datetime.date.today().replace(day=1))
@@ -135,17 +139,17 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         # Arquivo (Drag & Drop)
         ctk.CTkFrame(frame_left, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=20, pady=20)
         self.create_section_label(frame_left, "3. ARQUIVO ZIP (Arraste aqui)")
-        
+
         self.frame_file = ctk.CTkFrame(frame_left, fg_color="#1e293b", corner_radius=8, border_width=2, border_color="#334155")
         self.frame_file.pack(fill="x", padx=20, pady=5, ipady=10)
-        
+
         # Registro DND
         self.frame_file.drop_target_register(DND_FILES)
         self.frame_file.dnd_bind('<<Drop>>', self.drop_file)
-        
+
         self.lbl_arquivo = ctk.CTkLabel(self.frame_file, text="Arraste o ZIP ou clique na pasta", text_color=COLOR_TEXT_DIM, font=("Consolas", 11))
         self.lbl_arquivo.pack(side="left", padx=10, pady=10)
-        
+
         self.btn_select = ctk.CTkButton(self.frame_file, text="📂", width=40, fg_color=COLOR_INFO, command=self.selecionar_zip)
         self.btn_select.pack(side="right", padx=10)
 
@@ -154,13 +158,13 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         frame_actions.pack(side="bottom", fill="x", padx=20, pady=30)
         self.btn_iniciar = ctk.CTkButton(frame_actions, text="INICIAR", height=50, font=("Arial", 14, "bold"), fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.iniciar_thread)
         self.btn_iniciar.pack(fill="x", pady=(0, 10))
-        self.btn_pdf = ctk.CTkButton(frame_actions, text="GERAR RELATÓRIO PDF", height=40, fg_color="transparent", border_width=1, border_color=COLOR_BORDER, state="disabled", command=self.gerar_pdf_acao)
+        self.btn_pdf = ctk.CTkButton(frame_actions, text="GERAR RELATÓRIO PDF", height=40, fg_color="transparent", border_width=1, border_color=COLOR_BORDER, state="disabled", command=self.gerar_pdf_acao_wrapper)
         self.btn_pdf.pack(fill="x")
 
         # DIREITA
         frame_right = ctk.CTkFrame(frame, fg_color="transparent")
         frame_right.grid(row=1, column=1, sticky="nsew", padx=(10, 0), pady=10)
-        
+
         self.card_status = ctk.CTkFrame(frame_right, fg_color=COLOR_CARD, corner_radius=15, border_color=COLOR_BORDER, border_width=1)
         self.card_status.pack(fill="x", pady=(0, 15))
         ctk.CTkLabel(self.card_status, text="STATUS", font=("Arial", 11, "bold"), text_color=COLOR_TEXT_DIM).pack(anchor="w", padx=20, pady=(15, 5))
@@ -182,29 +186,222 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
     # ==========================================
     def setup_tab_funcionarios(self):
         frame = self.tab_func
-        
+
         toolbar = ctk.CTkFrame(frame, fg_color="transparent", height=50)
         toolbar.pack(fill="x", padx=10, pady=10)
-        
+
         ctk.CTkButton(toolbar, text="+ Adicionar Novo", fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.add_funcionario).pack(side="left")
         ctk.CTkButton(toolbar, text="🔄 Atualizar", fg_color=COLOR_INFO, width=80, command=self.carregar_lista_funcionarios).pack(side="left", padx=10)
-        
+
         self.scroll_func = ctk.CTkScrollableFrame(frame, fg_color="transparent")
         self.scroll_func.pack(fill="both", expand=True, padx=10, pady=5)
-        
+
         self.carregar_lista_funcionarios()
+
+    # ==========================================
+    # ABA 3: RELATÓRIOS
+    # ==========================================
+    def setup_tab_relatorios(self):
+        frame = self.tab_relatorios
+        frame.grid_columnconfigure(0, weight=1)
+        frame.grid_rowconfigure(1, weight=1)
+
+        # Frame dos Controles
+        frame_controles = ctk.CTkFrame(frame, fg_color=COLOR_CARD, corner_radius=15, border_color=COLOR_BORDER, border_width=1)
+        frame_controles.grid(row=0, column=0, sticky="new", padx=10, pady=10)
+
+        # Seção de Filtros
+        self.create_section_label(frame_controles, "FILTROS")
+
+        # Frame para os filtros
+        frame_filtros = ctk.CTkFrame(frame_controles, fg_color="transparent")
+        frame_filtros.pack(fill="x", padx=20, pady=10)
+
+        # Filtro de Data
+        ctk.CTkLabel(frame_filtros, text="Período:", text_color=COLOR_TEXT_DIM).grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+        style_cal = {'background': '#1e293b', 'foreground': 'white', 'borderwidth': 0, 'date_pattern': 'dd/mm/yyyy'}
+
+        self.cal_relatorio_inicio = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal)
+        self.cal_relatorio_inicio.set_date(datetime.date.today().replace(day=1))
+        self.cal_relatorio_inicio.grid(row=0, column=1, padx=5)
+
+        ctk.CTkLabel(frame_filtros, text="até", text_color=COLOR_TEXT_DIM).grid(row=0, column=2, padx=5)
+
+        self.cal_relatorio_fim = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal)
+        self.cal_relatorio_fim.set_date(datetime.date.today())
+        self.cal_relatorio_fim.grid(row=0, column=3, padx=5)
+
+        # Filtro de Funcionário
+        ctk.CTkLabel(frame_filtros, text="Funcionário:", text_color=COLOR_TEXT_DIM).grid(row=0, column=4, sticky="w", padx=(20, 10))
+
+        nomes_funcionarios = self.get_employee_names()
+        self.combo_funcionarios = ctk.CTkComboBox(frame_filtros, values=["Todos"] + nomes_funcionarios, width=200)
+        self.combo_funcionarios.set("Todos")
+        self.combo_funcionarios.grid(row=0, column=5, padx=5)
+
+        # Botão para Gerar Relatório
+        self.btn_gerar_relatorio = ctk.CTkButton(frame_controles, text="Gerar Relatório", fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.gerar_relatorio)
+        self.btn_gerar_relatorio.pack(pady=(10, 20))
+
+        # Área de Preview do Relatório
+        self.txt_relatorio = ctk.CTkTextbox(frame, fg_color="black", text_color="#22c55e", font=("Consolas", 11), corner_radius=10)
+        self.txt_relatorio.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+
+        # Frame para os botões de exportação
+        frame_export = ctk.CTkFrame(frame, fg_color="transparent")
+        frame_export.grid(row=2, column=0, sticky="e", padx=10, pady=10)
+
+        self.btn_export_csv = ctk.CTkButton(frame_export, text="Exportar CSV", state="disabled", command=self.exportar_csv)
+        self.btn_export_csv.pack(side="left", padx=5)
+
+        self.btn_export_excel = ctk.CTkButton(frame_export, text="Exportar Excel", state="disabled", command=self.exportar_excel)
+        self.btn_export_excel.pack(side="left", padx=5)
+
+        self.btn_export_pdf = ctk.CTkButton(frame_export, text="Exportar PDF", state="disabled", command=self.exportar_pdf)
+        self.btn_export_pdf.pack(side="left", padx=5)
+
+
+    def gerar_relatorio(self):
+        self.txt_relatorio.delete("1.0", "end")
+
+        if not self.dados_consolidados:
+            self.txt_relatorio.insert("end", "Nenhum dado processado para gerar relatório.\nPor favor, processe um arquivo ZIP primeiro na aba 'Processamento'.")
+            return
+
+        self.txt_relatorio.insert("end", "Gerando relatório...\n")
+
+        data_inicio = self.cal_relatorio_inicio.get_date()
+        data_fim = self.cal_relatorio_fim.get_date()
+        funcionario_selecionado = self.combo_funcionarios.get()
+
+        # Filtrar dados
+        dados_filtrados = []
+        for registro in self.dados_consolidados:
+            try:
+                data_registro = datetime.datetime.strptime(registro['data'], "%d/%m/%Y").date()
+                if data_inicio <= data_registro <= data_fim:
+                    if funcionario_selecionado == "Todos" or registro['nome'] == funcionario_selecionado:
+                        dados_filtrados.append(registro)
+            except (ValueError, TypeError):
+                continue
+
+        if not dados_filtrados:
+            self.txt_relatorio.insert("end", "Nenhum registro encontrado para os filtros selecionados.\n")
+            return
+
+        # Agregar dados
+        registros_por_dia = defaultdict(lambda: defaultdict(list))
+        for registro in dados_filtrados:
+            registros_por_dia[registro['nome']][registro['data']].append(registro['hora'])
+
+        self.dados_relatorio = []
+        for nome, dias in registros_por_dia.items():
+            for data, horas in dias.items():
+                horas.sort()
+                entrada = horas[0]
+                saida = horas[-1] if len(horas) > 1 else "--:--"
+                self.dados_relatorio.append({
+                    "Nome": nome,
+                    "Data": data,
+                    "Entrada": entrada,
+                    "Saída": saida
+                })
+
+        # Ordenar relatório por data
+        self.dados_relatorio.sort(key=lambda x: datetime.datetime.strptime(x['Data'], "%d/%m/%Y"))
+
+        # Exibir no preview
+        self.txt_relatorio.delete("1.0", "end")
+        header = f"{'Nome':<20} {'Data':<12} {'Entrada':<10} {'Saída':<10}\n"
+        self.txt_relatorio.insert("end", header)
+        self.txt_relatorio.insert("end", "-" * 60 + "\n")
+
+        for linha in self.dados_relatorio:
+            self.txt_relatorio.insert("end", f"{linha['Nome']:<20} {linha['Data']:<12} {linha['Entrada']:<10} {linha['Saída']:<10}\n")
+
+        # Habilitar botões de exportação
+        self.btn_export_csv.configure(state="normal")
+        self.btn_export_excel.configure(state="normal")
+        self.btn_export_pdf.configure(state="normal")
+
+    def exportar_pdf(self):
+        if not self.dados_relatorio:
+            messagebox.showwarning("Aviso", "Gere um relatório primeiro.")
+            return
+
+        filepath = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
+        if not filepath:
+            return
+
+        try:
+            self.gerar_pdf(filepath, self.dados_relatorio)
+            messagebox.showinfo("Sucesso", "Relatório exportado para PDF com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Ocorreu um erro ao exportar para PDF: {e}")
+
+    def exportar_csv(self):
+        if not self.dados_relatorio:
+            return
+
+        filepath = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self.dados_relatorio[0].keys())
+                writer.writeheader()
+                writer.writerows(self.dados_relatorio)
+            messagebox.showinfo("Sucesso", "Relatório exportado para CSV com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Ocorreu um erro ao exportar para CSV: {e}")
+
+    def exportar_excel(self):
+        if not self.dados_relatorio:
+            return
+
+        filepath = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        if not filepath:
+            return
+
+        try:
+            workbook = Workbook()
+            sheet = workbook.active
+
+            headers = list(self.dados_relatorio[0].keys())
+            sheet.append(headers)
+
+            for row in self.dados_relatorio:
+                sheet.append(list(row.values()))
+
+            workbook.save(filepath)
+            messagebox.showinfo("Sucesso", "Relatório exportado para Excel com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Ocorreu um erro ao exportar para Excel: {e}")
+
+    def get_employee_names(self):
+        if not os.path.exists(self.pasta_funcionarios):
+            return []
+
+        nomes = set()
+        for f in os.listdir(self.pasta_funcionarios):
+            if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                nome = os.path.splitext(f)[0].split('_')[0].capitalize()
+                nomes.add(nome)
+        return sorted(list(nomes))
 
     def carregar_lista_funcionarios(self):
         for widget in self.scroll_func.winfo_children():
             widget.destroy()
-            
+
         if not os.path.exists(self.pasta_funcionarios):
             ctk.CTkLabel(self.scroll_func, text="Nenhum funcionário cadastrado.").pack(pady=20)
             return
 
         arquivos = sorted([f for f in os.listdir(self.pasta_funcionarios) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
         funcionarios_dict = defaultdict(list)
-        
+
         for arq in arquivos:
             nome = os.path.splitext(arq)[0].split('_')[0].capitalize()
             funcionarios_dict[nome].append(arq)
@@ -219,10 +416,10 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
     def criar_grupo_funcionario(self, nome, fotos):
         card = ctk.CTkFrame(self.scroll_func, fg_color=COLOR_CARD, corner_radius=10, border_color=COLOR_BORDER, border_width=1)
         card.pack(fill="x", padx=5, pady=5)
-        
+
         header = ctk.CTkFrame(card, fg_color="transparent", height=50)
         header.pack(fill="x", padx=10, pady=5)
-        
+
         try:
             path = os.path.join(self.pasta_funcionarios, fotos[0])
             pil = Image.open(path)
@@ -240,7 +437,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         btn_expand.pack(side="right")
 
         body = ctk.CTkFrame(card, fg_color="#0b1120")
-        
+
         for f in fotos:
             row = ctk.CTkFrame(body, fg_color="transparent", height=30)
             row.pack(fill="x", padx=10, pady=2)
@@ -254,7 +451,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
                 body.pack_forget(); btn_expand.configure(text="▼")
             else:
                 body.pack(fill="x", padx=10, pady=(0, 10)); btn_expand.configure(text="▲")
-        
+
         btn_expand.configure(command=toggle)
 
     def add_funcionario(self):
@@ -311,7 +508,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
     def selecionar_zip(self):
         init_dir = self.config.get('last_dir', '/')
         f = filedialog.askopenfilename(initialdir=init_dir, filetypes=[("Arquivo ZIP", "*.zip")])
-        if f: 
+        if f:
             self.caminho_zip = f
             self.lbl_arquivo.configure(text=os.path.basename(f), text_color="white")
             self.config['last_dir'] = os.path.dirname(f)
@@ -322,7 +519,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def restaurar_botoes(self):
         self.btn_iniciar.configure(state="normal"); self.btn_parar.configure(state="disabled")
-        self.progress['value'] = 0; self.lbl_status_txt.configure(text="Pronto.")
+        self.progress_bar.set(0); self.lbl_status_txt.configure(text="Pronto.")
 
     def verificar_fila(self):
         try:
@@ -336,7 +533,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
                     self.lbl_estimativa.configure(text=task['estimativa'])
                 elif acao == 'corrigir': self.abrir_corretor_visual(task['lista'])
                 elif acao == 'salvar_final': threading.Thread(target=self.salvar_dados, args=(self.dados_temporarios,)).start()
-                elif acao == 'msg_fim': 
+                elif acao == 'msg_fim':
                     messagebox.showinfo("Fim", task['texto'])
                     self.btn_pdf.configure(state="normal", fg_color=COLOR_CARD)
                     self.restaurar_botoes()
@@ -404,7 +601,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
                 elif file.endswith(".txt") and not caminho_txt: caminho_txt = os.path.join(root, file)
                 if "-WA" in file or file.lower().endswith(('.jpg','.opus','.mp4','.webp')): media_files.append(os.path.join(root, file))
         if not caminho_txt: raise Exception("ZIP inválido.")
-        media_files.sort() 
+        media_files.sort()
         return self.temp_dir, caminho_txt, media_files
 
     def obter_horarios_validos(self, caminho_txt, d_ini, d_fim):
@@ -506,63 +703,143 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         if desconhecidos and not self.parar_execucao: self.queue.put({'acao': 'corrigir', 'lista': desconhecidos})
         else: self.queue.put({'acao': 'salvar_final'})
 
-    def gerar_pdf_acao(self):
-        if not self.dados_consolidados: return
-        arq = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")], initialfile="Relatorio.pdf")
-        if not arq: return
+    def gerar_pdf(self, filepath, data):
         try:
-            c = canvas.Canvas(arq, pagesize=A4); w, h = A4
+            c = canvas.Canvas(filepath, pagesize=A4)
+            w, h = A4
             resumo_global = {}
             meta_diaria = timedelta(hours=7, minutes=30)
-            for d in self.dados_consolidados:
-                nome = d['nome']
-                if nome not in resumo_global: resumo_global[nome] = {'dias': {}, 'saldo': timedelta(0)}
-                if d['data'] not in resumo_global[nome]['dias']: resumo_global[nome]['dias'][d['data']] = []
-                resumo_global[nome]['dias'][d['data']].append(d['hora'])
+
+            is_report_data = 'Entrada' in data[0]
+
+            if not is_report_data:
+                # This is consolidated data
+                for d in data:
+                    nome = d['nome']
+                    if nome not in resumo_global:
+                        resumo_global[nome] = {'dias': {}, 'saldo': timedelta(0)}
+                    if d['data'] not in resumo_global[nome]['dias']:
+                        resumo_global[nome]['dias'][d['data']] = []
+                    resumo_global[nome]['dias'][d['data']].append(d['hora'])
+            else:
+                # This is report data
+                for d in data:
+                    nome = d['Nome']
+                    if nome not in resumo_global:
+                        resumo_global[nome] = {'dias': {}, 'saldo': timedelta(0)}
+                    if d['Data'] not in resumo_global[nome]['dias']:
+                        resumo_global[nome]['dias'][d['Data']] = []
+                    resumo_global[nome]['dias'][d['Data']].append(d['Entrada'])
+                    resumo_global[nome]['dias'][d['Data']].append(d['Saída'])
+
             for nome, dados in resumo_global.items():
                 for dt, horas in dados['dias'].items():
                     horas.sort()
                     if len(horas) >= 2:
-                        ent = datetime.datetime.strptime(horas[0], "%H:%M")
-                        sai = datetime.datetime.strptime(horas[-1], "%H:%M")
-                        if ent != sai:
-                            trabalhado = (sai - ent) - timedelta(hours=1)
-                            dados['saldo'] += (trabalhado - meta_diaria)
+                        ent_str = horas[0]
+                        sai_str = horas[-1]
+                        if ent_str and sai_str and ent_str != '--:--' and sai_str != '--:--':
+                            ent = datetime.datetime.strptime(ent_str, "%H:%M")
+                            sai = datetime.datetime.strptime(sai_str, "%H:%M")
+                            if ent != sai:
+                                trabalhado = (sai - ent) - timedelta(hours=1)
+                                dados['saldo'] += (trabalhado - meta_diaria)
+
             y = h - 50
-            c.setFont("Helvetica-Bold", 18); c.drawString(50, y, "Relatório Executivo de Ponto"); y -= 40
-            c.setFillColor(colors.black); c.rect(50, y, 495, 25, fill=True, stroke=False)
-            c.setFillColor(colors.white); c.setFont("Helvetica-Bold", 12)
-            c.drawString(60, y+8, "FUNCIONÁRIO"); c.drawString(400, y+8, "SALDO TOTAL"); y -= 30
+            c.setFont("Helvetica-Bold", 18)
+            c.drawString(50, y, "Relatório Executivo de Ponto")
+            y -= 40
+            c.setFillColor(colors.black)
+            c.rect(50, y, 495, 25, fill=True, stroke=False)
+            c.setFillColor(colors.white)
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(60, y + 8, "FUNCIONÁRIO")
+            c.drawString(400, y + 8, "SALDO TOTAL")
+            y -= 30
+
             def fmt_delta(td):
-                s = int(td.total_seconds()); sign = "+" if s >= 0 else "-"; s = abs(s)
+                s = int(td.total_seconds())
+                sign = "+" if s >= 0 else "-"
+                s = abs(s)
                 return f"{sign}{s//3600:02d}:{(s%3600)//60:02d}"
+
             for nome in sorted(resumo_global.keys()):
                 saldo = resumo_global[nome]['saldo']
                 cor = colors.green if saldo.total_seconds() >= 0 else colors.red
-                c.setFillColor(colors.black); c.setFont("Helvetica", 11); c.drawString(60, y, nome)
-                c.setFillColor(cor); c.setFont("Helvetica-Bold", 11); c.drawString(400, y, fmt_delta(saldo))
-                c.setStrokeColor(colors.lightgrey); c.line(50, y-5, 545, y-5); y -= 25
-            c.showPage(); y = h - 50
+                c.setFillColor(colors.black)
+                c.setFont("Helvetica", 11)
+                c.drawString(60, y, nome)
+                c.setFillColor(cor)
+                c.setFont("Helvetica-Bold", 11)
+                c.drawString(400, y, fmt_delta(saldo))
+                c.setStrokeColor(colors.lightgrey)
+                c.line(50, y - 5, 545, y - 5)
+                y -= 25
+
+            c.showPage()
+            y = h - 50
+
             for nome in sorted(resumo_global.keys()):
-                if y < 150: c.showPage(); y = h - 50
-                c.setFillColor(colors.darkblue); c.setFont("Helvetica-Bold", 14); c.drawString(50, y, f"Extrato: {nome}"); y -= 25
-                c.setFillColor(colors.lightgrey); c.rect(50, y, 495, 15, fill=True, stroke=False)
-                c.setFillColor(colors.black); c.setFont("Helvetica-Bold", 9)
-                c.drawString(55, y+4, "DATA"); c.drawString(130, y+4, "ENTRADA"); c.drawString(200, y+4, "SAÍDA"); c.drawString(270, y+4, "STATUS"); y -= 20
+                if y < 150:
+                    c.showPage()
+                    y = h - 50
+                c.setFillColor(colors.darkblue)
+                c.setFont("Helvetica-Bold", 14)
+                c.drawString(50, y, f"Extrato: {nome}")
+                y -= 25
+                c.setFillColor(colors.lightgrey)
+                c.rect(50, y, 495, 15, fill=True, stroke=False)
+                c.setFillColor(colors.black)
+                c.setFont("Helvetica-Bold", 9)
+                c.drawString(55, y + 4, "DATA")
+                c.drawString(130, y + 4, "ENTRADA")
+                c.drawString(200, y + 4, "SAÍDA")
+                c.drawString(270, y + 4, "STATUS")
+                y -= 20
                 dias = resumo_global[nome]['dias']
+
                 datas_ordenadas = sorted(dias.keys(), key=lambda x: datetime.datetime.strptime(x, "%d/%m/%Y"))
+
                 for dt in datas_ordenadas:
-                    horas = dias[dt]; horas.sort()
-                    ent = horas[0]; sai = horas[-1]
-                    status = "OK"; cor_st = colors.black
-                    if ent == sai: status = "Ponto Incompleto"; cor_st = colors.orange; sai = "--:--"
-                    c.setFillColor(colors.black); c.setFont("Helvetica", 10)
-                    c.drawString(55, y, dt); c.drawString(130, y, ent); c.drawString(200, y, sai)
-                    c.setFillColor(cor_st); c.drawString(270, y, status); y -= 15
-                    if y < 50: c.showPage(); y = h - 50
+                    horas = dias[dt]
+                    horas.sort()
+                    ent = horas[0]
+                    sai = horas[-1]
+                    status = "OK"
+                    cor_st = colors.black
+                    if ent == sai:
+                        status = "Ponto Incompleto"
+                        cor_st = colors.orange
+                        sai = "--:--"
+                    c.setFillColor(colors.black)
+                    c.setFont("Helvetica", 10)
+                    c.drawString(55, y, dt)
+                    c.drawString(130, y, ent)
+                    c.drawString(200, y, sai)
+                    c.setFillColor(cor_st)
+                    c.drawString(270, y, status)
+                    y -= 15
+                    if y < 50:
+                        c.showPage()
+                        y = h - 50
                 y -= 30
-            c.save(); messagebox.showinfo("Sucesso", "PDF Gerado!"); os.startfile(arq)
-        except Exception as e: messagebox.showerror("Erro PDF", str(e))
+            c.save()
+        except Exception as e:
+            raise e
+
+    def gerar_pdf_acao_wrapper(self):
+        if not self.dados_consolidados:
+            messagebox.showwarning("Aviso", "Nenhum dado consolidado para gerar PDF.")
+            return
+        filepath = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")])
+        if not filepath:
+            return
+        try:
+            self.gerar_pdf(filepath, self.dados_consolidados)
+            messagebox.showinfo("Sucesso", "PDF Gerado!")
+            os.startfile(filepath)
+        except Exception as e:
+            messagebox.showerror("Erro PDF", str(e))
 
     def restaurar_botoes(self):
         self.btn_iniciar.configure(state="normal"); self.btn_parar.configure(state="disabled")
