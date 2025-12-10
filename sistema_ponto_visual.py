@@ -9,7 +9,7 @@ import os
 import datetime
 from datetime import timedelta
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import time
 import re
 import threading
@@ -320,9 +320,6 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
     def solicitar_parada(self):
         if messagebox.askyesno("Parar", "Interromper?"): self.parar_execucao = True
 
-    def restaurar_botoes(self):
-        self.btn_iniciar.configure(state="normal"); self.btn_parar.configure(state="disabled")
-        self.progress['value'] = 0; self.lbl_status_txt.configure(text="Pronto.")
 
     def verificar_fila(self):
         try:
@@ -437,8 +434,9 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         lista = [[d['nome'], d['data'], d['hora'], os.path.basename(d['caminho_completo'])] for d in dados]
         try:
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-            sheet = gspread.authorize(creds).open(NOME_PLANILHA_GOOGLE).sheet1
+            creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
+            client = gspread.authorize(creds)
+            sheet = client.open(NOME_PLANILHA_GOOGLE).sheet1
             sheet.append_rows(lista)
             self.queue.put({'acao': 'msg_fim', 'texto': "Processo Finalizado com Sucesso!"})
         except: self.queue.put({'acao': 'msg_fim', 'texto': "Erro Google Sheets (PDF Disponível)."})
@@ -566,7 +564,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def restaurar_botoes(self):
         self.btn_iniciar.configure(state="normal"); self.btn_parar.configure(state="disabled")
-        self.progress['value'] = 0; self.lbl_status_txt.configure(text="Pronto.")
+        self.progress_bar.set(0); self.lbl_status_txt.configure(text="Pronto.")
 
 if __name__ == "__main__":
     app = AppPonto()
