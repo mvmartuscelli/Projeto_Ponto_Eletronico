@@ -21,6 +21,8 @@ import shutil
 import tempfile
 import numpy as np
 import json
+import subprocess
+import sys
 from collections import defaultdict
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -51,6 +53,276 @@ def log_debug(msg):
 
 NOME_PLANILHA_GOOGLE = "PontoFuncionarios"
 ARQUIVO_CONFIG = "config.json"
+ARQUIVO_FUNCIONARIOS = "funcionarios.json"
+
+# --- JANELA DE SELEÇÃO DE MÚLTIPLOS FUNCIONÁRIOS ---
+class ToplevelSelecaoFuncionarios(ctk.CTkToplevel):
+    def __init__(self, master):
+        super().__init__(master)
+        self.master = master
+        self.title("Seleção Personalizada")
+        self.geometry("400x500")
+        self.transient(master)
+        self.grab_set()
+
+        self.checkboxes = {}
+
+        ctk.CTkLabel(self, text="Selecione os Funcionários", font=("Arial", 16, "bold")).pack(pady=10)
+
+        scroll_frame = ctk.CTkScrollableFrame(self)
+        scroll_frame.pack(fill="both", expand=True, padx=15, pady=5)
+
+        funcionarios_ativos = sorted(
+            [f for f in self.master.dados_funcionarios if f.get('status', 'ativo') == 'ativo'],
+            key=lambda x: x['nome']
+        )
+
+        for func in funcionarios_ativos:
+            frame_func = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            frame_func.pack(fill="x", pady=5)
+
+            var = ctk.StringVar(value="off")
+            checkbox = ctk.CTkCheckBox(frame_func, text=func['nome'], variable=var, onvalue=func['nome'], offvalue="off")
+            checkbox.pack(side="left")
+            self.checkboxes[func['nome']] = var
+
+        btn_confirmar = ctk.CTkButton(self, text="Confirmar", command=self.confirmar)
+        btn_confirmar.pack(pady=10)
+
+    def confirmar(self):
+        selecionados = [var.get() for var in self.checkboxes.values() if var.get() != "off"]
+
+        if not selecionados:
+            # Se nada for selecionado, reseta para "Todos"
+            self.master.funcionarios_selecionados = ["Todos"]
+            self.master.combo_funcionarios.set("Todos")
+            self.destroy()
+            return
+
+        self.master.funcionarios_selecionados = selecionados
+
+        # Atualiza o texto do combobox para refletir a seleção
+        if len(selecionados) == 1:
+            self.master.combo_funcionarios.set(selecionados[0])
+        else:
+            self.master.combo_funcionarios.set(f"{len(selecionados)} funcionários selecionados")
+
+        self.destroy()
+
+
+# --- JANELA DE CADASTRO/EDIÇÃO DE FUNCIONÁRIO ---
+class ToplevelWindowFuncionario(ctk.CTkToplevel):
+    def __init__(self, master, funcionario_data=None):
+        super().__init__(master)
+
+        self.master = master # Referência à janela principal
+        self.funcionario_data = funcionario_data
+
+        self.title("Cadastrar Novo Funcionário" if not funcionario_data else "Editar Funcionário")
+        self.geometry("500x650")
+        self.transient(master)
+        self.grab_set()
+
+        # --- VARIÁVEIS ---
+        self.photo_path = None
+        self.dados_extras_visiveis = False
+
+        # --- LAYOUT ---
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
+        # 1. ÁREA DA FOTO
+        self.frame_foto = ctk.CTkFrame(self, fg_color="#2b2b2b", height=200)
+        self.frame_foto.grid(row=0, column=0, sticky="ew", padx=20, pady=20)
+        self.frame_foto.pack_propagate(False)
+        self.frame_foto.drop_target_register(DND_FILES)
+        self.frame_foto.dnd_bind('<<Drop>>', self.drop_image)
+
+        self.lbl_foto_preview = ctk.CTkLabel(self.frame_foto, text="👤", font=("Arial", 100), text_color="gray")
+        self.lbl_foto_preview.pack(expand=True)
+
+        self.btn_add_foto = ctk.CTkButton(self.frame_foto, text="+", width=30, height=30, corner_radius=15, command=self.select_image)
+        self.btn_add_foto.place(relx=0.95, rely=0.95, anchor="se")
+
+        # 2. CAMPOS PRINCIPAIS
+        frame_campos = ctk.CTkFrame(self, fg_color="transparent")
+        frame_campos.grid(row=1, column=0, sticky="ew", padx=20)
+        frame_campos.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(frame_campos, text="Nome:").grid(row=0, column=0, sticky="w", pady=5)
+        self.entry_nome = ctk.CTkEntry(frame_campos)
+        self.entry_nome.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=5)
+
+        ctk.CTkLabel(frame_campos, text="Salário (R$):").grid(row=1, column=0, sticky="w", pady=5)
+        self.entry_salario = ctk.CTkEntry(frame_campos)
+        self.entry_salario.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=5)
+
+        ctk.CTkLabel(frame_campos, text="Admissão:").grid(row=2, column=0, sticky="w", pady=5)
+        self.entry_admissao = DateEntry(frame_campos, locale='pt_BR', date_pattern='dd/mm/yyyy')
+        self.entry_admissao.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=5)
+
+        # 3. BOTÃO DE DADOS EXTRAS
+        self.btn_dados_extras = ctk.CTkButton(self, text="Mais Dados ▼", fg_color="transparent", command=self.toggle_dados_extras)
+        self.btn_dados_extras.grid(row=2, column=0, sticky="w", padx=20, pady=10)
+
+        # 4. FRAME DE DADOS EXTRAS (inicialmente oculto)
+        self.frame_extra = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_extra.grid_columnconfigure(1, weight=1)
+        # Não usamos .grid() aqui ainda
+
+        ctk.CTkLabel(self.frame_extra, text="E-mail:").grid(row=0, column=0, sticky="w", pady=5)
+        self.entry_email = ctk.CTkEntry(self.frame_extra)
+        self.entry_email.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=5)
+
+        ctk.CTkLabel(self.frame_extra, text="Celular:").grid(row=1, column=0, sticky="w", pady=5)
+        self.entry_celular = ctk.CTkEntry(self.frame_extra)
+        self.entry_celular.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=5)
+
+        ctk.CTkLabel(self.frame_extra, text="CPF:").grid(row=2, column=0, sticky="w", pady=5)
+        self.entry_cpf = ctk.CTkEntry(self.frame_extra)
+        self.entry_cpf.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=5)
+
+        ctk.CTkLabel(self.frame_extra, text="CTPS:").grid(row=3, column=0, sticky="w", pady=5)
+        self.entry_ctps = ctk.CTkEntry(self.frame_extra)
+        self.entry_ctps.grid(row=3, column=1, sticky="ew", padx=(10, 0), pady=5)
+
+        # 5. BOTÕES DE AÇÃO
+        frame_botoes = ctk.CTkFrame(self, fg_color="transparent")
+        frame_botoes.grid(row=5, column=0, sticky="sew", padx=20, pady=20)
+        frame_botoes.grid_columnconfigure(0, weight=1)
+        frame_botoes.grid_columnconfigure(1, weight=1)
+
+        self.btn_salvar = ctk.CTkButton(frame_botoes, text="Salvar", fg_color=COLOR_ACCENT, command=self.salvar)
+        self.btn_salvar.grid(row=0, column=1, sticky="ew", padx=(5,0))
+
+        self.btn_cancelar = ctk.CTkButton(frame_botoes, text="Cancelar", fg_color=COLOR_DANGER, command=self.destroy)
+        self.btn_cancelar.grid(row=0, column=0, sticky="ew", padx=(0,5))
+
+        # Preencher dados se estiver em modo de edição
+        if self.funcionario_data:
+            self._preencher_dados()
+
+    def _preencher_dados(self):
+        self.entry_nome.insert(0, self.funcionario_data.get("nome", ""))
+        self.entry_salario.insert(0, self.funcionario_data.get("salario", ""))
+
+        try:
+            data_adm = datetime.datetime.strptime(self.funcionario_data.get("admissao"), '%d/%m/%Y').date()
+            self.entry_admissao.set_date(data_adm)
+        except (ValueError, TypeError):
+            pass
+
+        # Mostra os campos extras se houver dados neles
+        if any(self.funcionario_data.get(k) for k in ["email", "celular", "cpf", "carteira_trabalho"]):
+            self.toggle_dados_extras()
+
+        self.entry_email.insert(0, self.funcionario_data.get("email", ""))
+        self.entry_celular.insert(0, self.funcionario_data.get("celular", ""))
+        self.entry_cpf.insert(0, self.funcionario_data.get("cpf", ""))
+        self.entry_ctps.insert(0, self.funcionario_data.get("carteira_trabalho", ""))
+
+        if self.funcionario_data.get("fotos"):
+            primeira_foto = self.funcionario_data["fotos"][0]
+            path_foto = os.path.join(self.master.pasta_funcionarios, primeira_foto)
+            if os.path.exists(path_foto):
+                self._carregar_imagem(path_foto)
+
+    def drop_image(self, event):
+        path = event.data.replace('{', '').replace('}', '')
+        if path.lower().endswith(('.png', '.jpg', '.jpeg')):
+            self.photo_path = path
+            self._carregar_imagem(path)
+        else:
+            messagebox.showwarning("Formato Inválido", "Por favor, arraste um arquivo de imagem (PNG, JPG).", parent=self)
+
+    def select_image(self):
+        path = filedialog.askopenfilename(filetypes=[("Imagens", "*.jpg *.jpeg *.png")])
+        if path:
+            self.photo_path = path
+            self._carregar_imagem(path)
+
+    def _carregar_imagem(self, path):
+        try:
+            pil_image = Image.open(path)
+            h, w = pil_image.height, pil_image.width
+            ratio = min(180/w, 180/h)
+
+            ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(int(w*ratio), int(h*ratio)))
+            self.lbl_foto_preview.configure(image=ctk_image, text="")
+        except Exception as e:
+            messagebox.showerror("Erro ao carregar imagem", str(e), parent=self)
+
+    def toggle_dados_extras(self):
+        self.dados_extras_visiveis = not self.dados_extras_visiveis
+        if self.dados_extras_visiveis:
+            self.frame_extra.grid(row=3, column=0, sticky="ew", padx=20, pady=10)
+            self.btn_dados_extras.configure(text="Menos Dados ▲")
+            self.geometry("500x800")
+        else:
+            self.frame_extra.grid_forget()
+            self.btn_dados_extras.configure(text="Mais Dados ▼")
+            self.geometry("500x650")
+
+    def salvar(self):
+        nome = self.entry_nome.get().strip()
+        if not nome:
+            messagebox.showerror("Campo Obrigatório", "O nome do funcionário é obrigatório.", parent=self)
+            return
+
+        salario = self.entry_salario.get().replace(',', '.')
+        try:
+            float(salario if salario else 0)
+        except ValueError:
+            messagebox.showerror("Valor Inválido", "O salário deve ser um número válido.", parent=self)
+            return
+
+        # Lógica para salvar/atualizar
+        try:
+            novo_nome_foto = None
+            if self.photo_path:
+                nome_limpo = re.sub(r'[^a-zA-Z0-9]', '', nome)
+                novo_nome_foto = f"{nome_limpo}_{int(time.time())}.jpg"
+                shutil.copy(self.photo_path, os.path.join(self.master.pasta_funcionarios, novo_nome_foto))
+
+            if self.funcionario_data is None: # Novo Cadastro
+                if not self.photo_path:
+                    messagebox.showerror("Campo Obrigatório", "A foto é obrigatória para um novo cadastro.", parent=self)
+                    return
+
+                novo_funcionario = {
+                    "id": int(time.time() * 1000),
+                    "nome": nome,
+                    "salario": salario,
+                    "admissao": self.entry_admissao.get_date().strftime('%d/%m/%Y'),
+                    "email": self.entry_email.get(),
+                    "celular": self.entry_celular.get(),
+                    "cpf": self.entry_cpf.get(),
+                    "carteira_trabalho": self.entry_ctps.get(),
+                    "status": "ativo",
+                    "fotos": [novo_nome_foto]
+                }
+                self.master.dados_funcionarios.append(novo_funcionario)
+            else: # Edição
+                for func in self.master.dados_funcionarios:
+                    if func['id'] == self.funcionario_data['id']:
+                        func['nome'] = nome
+                        func['salario'] = salario
+                        func['admissao'] = self.entry_admissao.get_date().strftime('%d/%m/%Y')
+                        func['email'] = self.entry_email.get()
+                        func['celular'] = self.entry_celular.get()
+                        func['cpf'] = self.entry_cpf.get()
+                        func['carteira_trabalho'] = self.entry_ctps.get()
+                        if novo_nome_foto:
+                            func['fotos'].append(novo_nome_foto)
+                        break
+
+            self.master.salvar_dados_funcionarios()
+            self.master.carregar_lista_funcionarios()
+            self.destroy()
+
+        except Exception as e:
+            messagebox.showerror("Erro ao Salvar", str(e), parent=self)
+
 
 # --- CLASSE PRINCIPAL COM SUPORTE A DND ---
 class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
@@ -79,6 +351,10 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         self.pasta_funcionarios = "funcionarios"
         if not os.path.exists(self.pasta_funcionarios): os.makedirs(self.pasta_funcionarios)
 
+        self.dados_funcionarios = []
+        self.carregar_dados_funcionarios()
+
+        self.historico_relatorios = []
         self.dados_consolidados = []
         self.caminho_zip = ""
         self.conhecidos_nom = []
@@ -120,21 +396,29 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         style_cal = {'background': '#1e293b', 'foreground': 'white', 'borderwidth': 0, 'date_pattern': 'dd/mm/yyyy'}
 
         ctk.CTkLabel(frame_datas, text="De:", text_color=COLOR_TEXT_DIM).grid(row=0, column=0, sticky="w")
-        self.cal_inicio = DateEntry(frame_datas, width=12, font=("Arial", 11), **style_cal)
+        self.cal_inicio = DateEntry(frame_datas, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
         self.cal_inicio.set_date(datetime.date.today().replace(day=1))
         self.cal_inicio.grid(row=1, column=0, padx=5, pady=5)
 
         ctk.CTkLabel(frame_datas, text="Até:", text_color=COLOR_TEXT_DIM).grid(row=0, column=1, sticky="w")
-        self.cal_fim = DateEntry(frame_datas, width=12, font=("Arial", 11), **style_cal)
+        self.cal_fim = DateEntry(frame_datas, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
         self.cal_fim.set_date(datetime.date.today())
         self.cal_fim.grid(row=1, column=1, padx=5, pady=5)
 
         # Slider
         ctk.CTkFrame(frame_left, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=20, pady=20)
         self.create_section_label(frame_left, "2. SENSIBILIDADE")
-        self.slider = ctk.CTkSlider(frame_left, from_=0.35, to=0.60, number_of_steps=25, progress_color=COLOR_ACCENT)
+
+        frame_slider = ctk.CTkFrame(frame_left, fg_color="transparent")
+        frame_slider.pack(fill="x", padx=20, pady=5)
+        frame_slider.grid_columnconfigure(0, weight=1)
+
+        self.slider = ctk.CTkSlider(frame_slider, from_=0.35, to=0.60, number_of_steps=25, progress_color=COLOR_ACCENT, command=self.update_slider_label)
         self.slider.set(self.config.get('tolerancia', 0.45))
-        self.slider.pack(fill="x", padx=25, pady=5)
+        self.slider.grid(row=0, column=0, sticky="ew", padx=(5, 15))
+
+        self.lbl_slider_value = ctk.CTkLabel(frame_slider, text=f"{self.slider.get():.2f}", font=("Consolas", 12), text_color=COLOR_TEXT_DIM, width=40)
+        self.lbl_slider_value.grid(row=0, column=1)
 
         # Arquivo (Drag & Drop)
         ctk.CTkFrame(frame_left, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=20, pady=20)
@@ -178,6 +462,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.txt_log = ctk.CTkTextbox(frame_right, fg_color="black", text_color="#22c55e", font=("Consolas", 11), corner_radius=10)
         self.txt_log.pack(fill="both", expand=True)
+        self.txt_log.configure(state="disabled")
         self.btn_parar = ctk.CTkButton(frame_right, text="PARAR", fg_color="#450a0a", text_color=COLOR_DANGER, width=80, state="disabled", command=self.solicitar_parada)
         self.btn_parar.place(relx=1.0, rely=0.0, anchor="ne", x=0, y=-40)
 
@@ -187,11 +472,30 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
     def setup_tab_funcionarios(self):
         frame = self.tab_func
 
+        # --- Toolbar Superior ---
         toolbar = ctk.CTkFrame(frame, fg_color="transparent", height=50)
         toolbar.pack(fill="x", padx=10, pady=10)
 
         ctk.CTkButton(toolbar, text="+ Adicionar Novo", fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.add_funcionario).pack(side="left")
-        ctk.CTkButton(toolbar, text="🔄 Atualizar", fg_color=COLOR_INFO, width=80, command=self.carregar_lista_funcionarios).pack(side="left", padx=10)
+        ctk.CTkButton(toolbar, text="🔄 Recarregar", fg_color=COLOR_INFO, width=100, command=self.carregar_lista_funcionarios).pack(side="left", padx=10)
+
+        # --- Frame de Filtros ---
+        filter_frame = ctk.CTkFrame(frame, fg_color=COLOR_CARD, border_width=1, border_color=COLOR_BORDER)
+        filter_frame.pack(fill="x", padx=10, pady=(0, 10), ipady=10)
+
+        ctk.CTkLabel(filter_frame, text="Filtrar por nome:").pack(side="left", padx=(15, 5))
+        self.filtro_nome = ctk.CTkEntry(filter_frame, placeholder_text="Digite um nome...")
+        self.filtro_nome.pack(side="left", padx=5, fill="x", expand=True)
+        self.filtro_nome.bind("<KeyRelease>", lambda e: self.carregar_lista_funcionarios())
+
+        ctk.CTkLabel(filter_frame, text="Ordenar por:").pack(side="left", padx=(15, 5))
+        self.filtro_ordem_campo = ctk.CTkComboBox(filter_frame, values=["Nome", "Data de Admissão", "Salário"], command=lambda e: self.carregar_lista_funcionarios())
+        self.filtro_ordem_campo.set("Nome")
+        self.filtro_ordem_campo.pack(side="left", padx=5)
+
+        self.filtro_ordem_dir = ctk.CTkComboBox(filter_frame, values=["Crescente", "Decrescente"], width=120, command=lambda e: self.carregar_lista_funcionarios())
+        self.filtro_ordem_dir.set("Crescente")
+        self.filtro_ordem_dir.pack(side="left", padx=5)
 
         self.scroll_func = ctk.CTkScrollableFrame(frame, fg_color="transparent")
         self.scroll_func.pack(fill="both", expand=True, padx=10, pady=5)
@@ -222,23 +526,25 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
 
         style_cal = {'background': '#1e293b', 'foreground': 'white', 'borderwidth': 0, 'date_pattern': 'dd/mm/yyyy'}
 
-        self.cal_relatorio_inicio = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal)
+        self.cal_relatorio_inicio = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
         self.cal_relatorio_inicio.set_date(datetime.date.today().replace(day=1))
         self.cal_relatorio_inicio.grid(row=0, column=1, padx=5)
 
         ctk.CTkLabel(frame_filtros, text="até", text_color=COLOR_TEXT_DIM).grid(row=0, column=2, padx=5)
 
-        self.cal_relatorio_fim = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal)
+        self.cal_relatorio_fim = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
         self.cal_relatorio_fim.set_date(datetime.date.today())
         self.cal_relatorio_fim.grid(row=0, column=3, padx=5)
 
         # Filtro de Funcionário
         ctk.CTkLabel(frame_filtros, text="Funcionário:", text_color=COLOR_TEXT_DIM).grid(row=0, column=4, sticky="w", padx=(20, 10))
 
-        nomes_funcionarios = self.get_employee_names()
-        self.combo_funcionarios = ctk.CTkComboBox(frame_filtros, values=["Todos"] + nomes_funcionarios, width=200)
+        self.funcionarios_selecionados = ["Todos"]
+        self.combo_funcionarios = ctk.CTkComboBox(frame_filtros, values=["Todos", "Personalizar..."], width=200, command=self.on_selecionar_funcionario)
         self.combo_funcionarios.set("Todos")
         self.combo_funcionarios.grid(row=0, column=5, padx=5)
+
+        self.tab_relatorios.bind("<<TabSelected>>", self.atualizar_lista_funcionarios_relatorio)
 
         # Botão para Gerar Relatório
         self.btn_gerar_relatorio = ctk.CTkButton(frame_controles, text="Gerar Relatório", fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.gerar_relatorio)
@@ -247,6 +553,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         # Área de Preview do Relatório
         self.txt_relatorio = ctk.CTkTextbox(frame, fg_color="black", text_color="#22c55e", font=("Consolas", 11), corner_radius=10)
         self.txt_relatorio.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.txt_relatorio.configure(state="disabled")
 
         # Frame para os botões de exportação
         frame_export = ctk.CTkFrame(frame, fg_color="transparent")
@@ -261,33 +568,62 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_export_pdf = ctk.CTkButton(frame_export, text="Exportar PDF", state="disabled", command=self.exportar_pdf)
         self.btn_export_pdf.pack(side="left", padx=5)
 
+        # --- Histórico de Relatórios ---
+        ctk.CTkLabel(frame, text="HISTÓRICO DE RELATÓRIOS GERADOS", font=("Arial", 11, "bold"), text_color=COLOR_TEXT_DIM).grid(row=3, column=0, sticky="w", padx=10, pady=(10,0))
+        self.scroll_historico = ctk.CTkScrollableFrame(frame, height=150, fg_color=COLOR_CARD)
+        self.scroll_historico.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
+        self.lbl_historico_vazio = ctk.CTkLabel(self.scroll_historico, text="Nenhum relatório gerado nesta sessão.", text_color=COLOR_TEXT_DIM)
+        self.lbl_historico_vazio.pack(pady=20)
+
+    def on_selecionar_funcionario(self, choice):
+        if choice == "Personalizar...":
+            self.open_selecao_funcionarios_window()
+        else:
+            self.funcionarios_selecionados = [choice]
+
+    def open_selecao_funcionarios_window(self):
+        # Garante que a janela não seja aberta múltiplas vezes
+        if hasattr(self, 'toplevel_selecao') and self.toplevel_selecao.winfo_exists():
+            self.toplevel_selecao.focus()
+            return
+        self.toplevel_selecao = ToplevelSelecaoFuncionarios(self)
+        self.wait_window(self.toplevel_selecao) # Pausa a execução até a janela ser fechada
+
+
+    def atualizar_lista_funcionarios_relatorio(self, event=None):
+        nomes_ativos = sorted([
+            f['nome'] for f in self.dados_funcionarios if f.get('status', 'ativo') == 'ativo'
+        ])
+        self.combo_funcionarios.configure(values=["Todos"] + nomes_ativos + ["Personalizar..."])
 
     def gerar_relatorio(self):
+        self.txt_relatorio.configure(state="normal")
         self.txt_relatorio.delete("1.0", "end")
 
         if not self.dados_consolidados:
             self.txt_relatorio.insert("end", "Nenhum dado processado para gerar relatório.\nPor favor, processe um arquivo ZIP primeiro na aba 'Processamento'.")
+            self.txt_relatorio.configure(state="disabled")
             return
 
         self.txt_relatorio.insert("end", "Gerando relatório...\n")
 
         data_inicio = self.cal_relatorio_inicio.get_date()
         data_fim = self.cal_relatorio_fim.get_date()
-        funcionario_selecionado = self.combo_funcionarios.get()
 
-        # Filtrar dados
+        # Filtrar dados com base na nova lista de seleção
         dados_filtrados = []
         for registro in self.dados_consolidados:
             try:
                 data_registro = datetime.datetime.strptime(registro['data'], "%d/%m/%Y").date()
                 if data_inicio <= data_registro <= data_fim:
-                    if funcionario_selecionado == "Todos" or registro['nome'] == funcionario_selecionado:
+                    if "Todos" in self.funcionarios_selecionados or registro['nome'] in self.funcionarios_selecionados:
                         dados_filtrados.append(registro)
             except (ValueError, TypeError):
                 continue
 
         if not dados_filtrados:
             self.txt_relatorio.insert("end", "Nenhum registro encontrado para os filtros selecionados.\n")
+            self.txt_relatorio.configure(state="disabled")
             return
 
         # Agregar dados
@@ -320,10 +656,65 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         for linha in self.dados_relatorio:
             self.txt_relatorio.insert("end", f"{linha['Nome']:<20} {linha['Data']:<12} {linha['Entrada']:<10} {linha['Saída']:<10}\n")
 
+        self.txt_relatorio.configure(state="disabled")
         # Habilitar botões de exportação
         self.btn_export_csv.configure(state="normal")
         self.btn_export_excel.configure(state="normal")
         self.btn_export_pdf.configure(state="normal")
+
+        self.adicionar_relatorio_ao_historico()
+
+    def adicionar_relatorio_ao_historico(self):
+        nome_relatorio = self.combo_funcionarios.get()
+        if len(self.funcionarios_selecionados) > 1:
+            nome_relatorio = f"{len(self.funcionarios_selecionados)} funcionários"
+
+        novo_historico = {
+            "nome": nome_relatorio,
+            "timestamp": datetime.datetime.now(),
+            "dados": self.dados_relatorio.copy()
+        }
+        self.historico_relatorios.insert(0, novo_historico) # Adiciona no início
+        self.atualizar_visualizacao_historico()
+
+    def atualizar_visualizacao_historico(self):
+        for widget in self.scroll_historico.winfo_children():
+            widget.destroy()
+
+        if not self.historico_relatorios:
+            self.lbl_historico_vazio = ctk.CTkLabel(self.scroll_historico, text="Nenhum relatório gerado nesta sessão.", text_color=COLOR_TEXT_DIM)
+            self.lbl_historico_vazio.pack(pady=20)
+            return
+
+        for item in self.historico_relatorios:
+            card = ctk.CTkButton(
+                self.scroll_historico,
+                text=f"{item['nome']} - {item['timestamp'].strftime('%H:%M:%S')}",
+                fg_color="#1e293b",
+                hover_color="#3b82f6",
+                anchor="w",
+                command=lambda i=item: self.recarregar_relatorio_do_historico(i)
+            )
+            card.pack(fill="x", padx=5, pady=2)
+
+    def recarregar_relatorio_do_historico(self, item_historico):
+        self.dados_relatorio = item_historico['dados']
+
+        self.txt_relatorio.configure(state="normal")
+        self.txt_relatorio.delete("1.0", "end")
+
+        header = f"{'Nome':<20} {'Data':<12} {'Entrada':<10} {'Saída':<10}\n"
+        self.txt_relatorio.insert("end", header)
+        self.txt_relatorio.insert("end", "-" * 60 + "\n")
+
+        for linha in self.dados_relatorio:
+            self.txt_relatorio.insert("end", f"{linha['Nome']:<20} {linha['Data']:<12} {linha['Entrada']:<10} {linha['Saída']:<10}\n")
+
+        self.txt_relatorio.configure(state="disabled")
+        self.btn_export_csv.configure(state="normal")
+        self.btn_export_excel.configure(state="normal")
+        self.btn_export_pdf.configure(state="normal")
+
 
     def exportar_pdf(self):
         if not self.dados_relatorio:
@@ -380,40 +771,48 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception as e:
             messagebox.showerror("Erro", f"Ocorreu um erro ao exportar para Excel: {e}")
 
-    def get_employee_names(self):
-        if not os.path.exists(self.pasta_funcionarios):
-            return []
-
-        nomes = set()
-        for f in os.listdir(self.pasta_funcionarios):
-            if f.lower().endswith(('.jpg', '.jpeg', '.png')):
-                nome = os.path.splitext(f)[0].split('_')[0].capitalize()
-                nomes.add(nome)
-        return sorted(list(nomes))
-
-    def carregar_lista_funcionarios(self):
+    def carregar_lista_funcionarios(self, event=None):
         for widget in self.scroll_func.winfo_children():
             widget.destroy()
 
-        if not os.path.exists(self.pasta_funcionarios):
-            ctk.CTkLabel(self.scroll_func, text="Nenhum funcionário cadastrado.").pack(pady=20)
+        # 1. Filtrar
+        texto_filtro = self.filtro_nome.get().lower()
+        funcionarios_filtrados = [
+            f for f in self.dados_funcionarios
+            if f.get('status', 'ativo') == 'ativo' and texto_filtro in f['nome'].lower()
+        ]
+
+        # 2. Ordenar
+        campo_ordem = self.filtro_ordem_campo.get()
+        direcao_ordem = self.filtro_ordem_dir.get() == "Decrescente"
+
+        def get_sort_key(f):
+            if campo_ordem == "Data de Admissão":
+                try:
+                    return datetime.datetime.strptime(f.get("admissao", "01/01/1900"), '%d/%m/%Y')
+                except ValueError:
+                    return datetime.datetime.min
+            elif campo_ordem == "Salário":
+                try:
+                    return float(str(f.get("salario", "0")).replace(',', '.'))
+                except ValueError:
+                    return 0.0
+            return f['nome'].lower()
+
+        funcionarios_filtrados.sort(key=get_sort_key, reverse=direcao_ordem)
+
+        # 3. Exibir
+        if not funcionarios_filtrados:
+            ctk.CTkLabel(self.scroll_func, text="Nenhum funcionário encontrado com os filtros atuais.").pack(pady=20)
             return
 
-        arquivos = sorted([f for f in os.listdir(self.pasta_funcionarios) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
-        funcionarios_dict = defaultdict(list)
+        for funcionario_data in funcionarios_filtrados:
+            self.criar_grupo_funcionario(funcionario_data)
 
-        for arq in arquivos:
-            nome = os.path.splitext(arq)[0].split('_')[0].capitalize()
-            funcionarios_dict[nome].append(arq)
+    def criar_grupo_funcionario(self, funcionario_data):
+        nome = funcionario_data['nome']
+        fotos = funcionario_data['fotos']
 
-        if not funcionarios_dict:
-            ctk.CTkLabel(self.scroll_func, text="Nenhum funcionário encontrado.").pack(pady=20)
-            return
-
-        for nome, lista_fotos in funcionarios_dict.items():
-            self.criar_grupo_funcionario(nome, lista_fotos)
-
-    def criar_grupo_funcionario(self, nome, fotos):
         card = ctk.CTkFrame(self.scroll_func, fg_color=COLOR_CARD, corner_radius=10, border_color=COLOR_BORDER, border_width=1)
         card.pack(fill="x", padx=5, pady=5)
 
@@ -421,12 +820,15 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         header.pack(fill="x", padx=10, pady=5)
 
         try:
-            path = os.path.join(self.pasta_funcionarios, fotos[0])
-            pil = Image.open(path)
-            pil.thumbnail((40, 40))
-            tk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(40, 40))
-            lbl_img = ctk.CTkLabel(header, image=tk_img, text="")
-            lbl_img.pack(side="left")
+            path = os.path.join(self.pasta_funcionarios, fotos[0]) if fotos else ""
+            if path and os.path.exists(path):
+                pil = Image.open(path)
+                pil.thumbnail((40, 40))
+                tk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=(40, 40))
+                lbl_img = ctk.CTkLabel(header, image=tk_img, text="")
+                lbl_img.pack(side="left")
+            else:
+                ctk.CTkLabel(header, text="👤", font=("Arial", 20)).pack(side="left", padx=10)
         except:
             ctk.CTkLabel(header, text="👤", font=("Arial", 20)).pack(side="left", padx=10)
 
@@ -438,13 +840,27 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
 
         body = ctk.CTkFrame(card, fg_color="#0b1120")
 
+        # Ações do funcionário
+        frame_acoes = ctk.CTkFrame(body, fg_color="transparent")
+        frame_acoes.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkButton(frame_acoes, text="Editar", width=80, command=lambda f=funcionario_data: self.open_funcionario_window(f)).pack(side="left", padx=5)
+        ctk.CTkButton(frame_acoes, text="Adicionar Variação", width=120, command=lambda f=funcionario_data: self.open_adicionar_variacao_window(f)).pack(side="left", padx=5)
+        ctk.CTkButton(frame_acoes, text="Histórico", width=80, state="disabled").pack(side="left", padx=5)
+        btn_excluir = ctk.CTkButton(frame_acoes, text="Excluir", fg_color=COLOR_DANGER, width=80, command=lambda f=funcionario_data: self.excluir_funcionario(f))
+        btn_excluir.pack(side="right", padx=5)
+
+        # Lista de fotos
+        frame_fotos = ctk.CTkFrame(body, fg_color="transparent")
+        frame_fotos.pack(fill="x", padx=10, pady=5)
+
         for f in fotos:
-            row = ctk.CTkFrame(body, fg_color="transparent", height=30)
+            row = ctk.CTkFrame(frame_fotos, fg_color="transparent", height=30)
             row.pack(fill="x", padx=10, pady=2)
             ctk.CTkLabel(row, text=f"📄 {f}", font=("Consolas", 11), text_color="gray").pack(side="left")
-            btn_del = ctk.CTkButton(row, text="🗑️", width=30, height=20, fg_color="transparent", hover_color=COLOR_DANGER,
-                                    command=lambda file=f: self.delete_funcionario(file))
-            btn_del.pack(side="right")
+            btn_del_foto = ctk.CTkButton(row, text="🗑️", width=30, height=20, fg_color="transparent", hover_color=COLOR_DANGER,
+                                    command=lambda file=f: self.delete_foto_funcionario(funcionario_data['id'], file))
+            btn_del_foto.pack(side="right")
 
         def toggle():
             if body.winfo_ismapped():
@@ -455,23 +871,84 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         btn_expand.configure(command=toggle)
 
     def add_funcionario(self):
-        path = filedialog.askopenfilename(filetypes=[("Imagens", "*.jpg *.jpeg *.png")])
-        if not path: return
-        nome = ctk.CTkInputDialog(text="Nome (Primeiro nome):", title="Cadastro").get_input()
-        if not nome: return
-        try:
-            nome_limpo = nome.strip().capitalize()
-            novo_nome = f"{nome_limpo}_{int(time.time())}.jpg"
-            shutil.copy(path, os.path.join(self.pasta_funcionarios, novo_nome))
-            self.carregar_lista_funcionarios()
-        except Exception as e: messagebox.showerror("Erro", str(e))
+        self.open_funcionario_window()
 
-    def delete_funcionario(self, filename):
-        if messagebox.askyesno("Confirmar", f"Excluir {filename}?"):
-            try:
-                os.remove(os.path.join(self.pasta_funcionarios, filename))
-                self.carregar_lista_funcionarios()
-            except Exception as e: messagebox.showerror("Erro", str(e))
+    def open_funcionario_window(self, funcionario_data=None):
+        if hasattr(self, 'toplevel_window') and self.toplevel_window.winfo_exists():
+            self.toplevel_window.focus()
+            return
+        self.toplevel_window = ToplevelWindowFuncionario(self, funcionario_data)
+
+    def open_adicionar_variacao_window(self, funcionario):
+        path = filedialog.askopenfilename(
+            title=f"Selecione uma nova foto para {funcionario['nome']}",
+            filetypes=[("Imagens", "*.jpg *.jpeg *.png")]
+        )
+        if not path:
+            return
+
+        try:
+            nome_limpo = re.sub(r'[^a-zA-Z0-9]', '', funcionario['nome'])
+            novo_nome_foto = f"{nome_limpo}_{int(time.time())}.jpg"
+
+            # Copia a nova foto
+            shutil.copy(path, os.path.join(self.pasta_funcionarios, novo_nome_foto))
+
+            # Atualiza a lista de fotos do funcionário
+            for func in self.dados_funcionarios:
+                if func['id'] == funcionario['id']:
+                    func['fotos'].append(novo_nome_foto)
+                    break
+
+            self.salvar_dados_funcionarios()
+            self.carregar_lista_funcionarios()
+            messagebox.showinfo("Sucesso", "Nova variação de foto adicionada com sucesso!")
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Ocorreu um erro ao adicionar a variação: {e}")
+
+    def excluir_funcionario(self, funcionario):
+        if not messagebox.askyesno("Confirmar Exclusão", f"Tem certeza que deseja excluir o funcionário '{funcionario['nome']}'?\n\nIsso irá apenas desativá-lo da interface, mantendo seus dados no histórico. A ação pode ser revertida manualmente no arquivo 'funcionarios.json'."):
+            return
+
+        try:
+            # Encontra o funcionário e muda o status
+            for func in self.dados_funcionarios:
+                if func['id'] == funcionario['id']:
+                    func['status'] = 'inativo'
+                    break
+
+            self.salvar_dados_funcionarios()
+            self.carregar_lista_funcionarios()
+            messagebox.showinfo("Sucesso", f"Funcionário '{funcionario['nome']}' desativado.")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Ocorreu um erro ao excluir o funcionário: {e}")
+
+    def delete_foto_funcionario(self, funcionario_id, filename):
+        if not messagebox.askyesno("Confirmar Exclusão", f"Tem certeza que deseja excluir a foto '{filename}'?\nEsta ação não pode ser desfeita."):
+            return
+
+        try:
+            # Encontra o funcionário e remove a foto da lista
+            for func in self.dados_funcionarios:
+                if func['id'] == funcionario_id:
+                    if filename in func['fotos']:
+                        func['fotos'].remove(filename)
+                        break
+
+            # Salva a alteração no JSON
+            self.salvar_dados_funcionarios()
+
+            # Remove o arquivo físico
+            filepath = os.path.join(self.pasta_funcionarios, filename)
+            if os.path.exists(filepath):
+                os.remove(filepath)
+
+            # Recarrega a interface
+            self.carregar_lista_funcionarios()
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Ocorreu um erro ao excluir a foto: {e}")
 
     # --- DRAG & DROP HANDLER ---
     def drop_file(self, event):
@@ -498,12 +975,70 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
             with open(ARQUIVO_CONFIG, 'w') as f: json.dump(self.config, f)
         except: pass
 
+    def carregar_dados_funcionarios(self):
+        if not os.path.exists(ARQUIVO_FUNCIONARIOS):
+            self.migrar_dados_antigos()
+
+        try:
+            with open(ARQUIVO_FUNCIONARIOS, 'r', encoding='utf-8') as f:
+                self.dados_funcionarios = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.dados_funcionarios = []
+
+    def salvar_dados_funcionarios(self):
+        try:
+            with open(ARQUIVO_FUNCIONARIOS, 'w', encoding='utf-8') as f:
+                json.dump(self.dados_funcionarios, f, indent=4)
+        except Exception as e:
+            messagebox.showerror("Erro ao Salvar", f"Não foi possível salvar os dados dos funcionários: {e}")
+
+    def migrar_dados_antigos(self):
+        log_debug("Arquivo 'funcionarios.json' não encontrado. Tentando migrar do sistema antigo...")
+        funcionarios_migrados = []
+        if not os.path.exists(self.pasta_funcionarios):
+            self.dados_funcionarios = []
+            self.salvar_dados_funcionarios()
+            return
+
+        arquivos = [f for f in os.listdir(self.pasta_funcionarios) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        funcionarios_dict = defaultdict(list)
+
+        for arq in arquivos:
+            try:
+                nome = os.path.splitext(arq)[0].split('_')[0].capitalize()
+                funcionarios_dict[nome].append(arq)
+            except:
+                continue
+
+        for nome, fotos in funcionarios_dict.items():
+            funcionarios_migrados.append({
+                "id": int(time.time() * 1000) + len(funcionarios_migrados),
+                "nome": nome,
+                "salario": "",
+                "admissao": "",
+                "email": "",
+                "celular": "",
+                "cpf": "",
+                "carteira_trabalho": "",
+                "status": "ativo",
+                "fotos": fotos
+            })
+
+        self.dados_funcionarios = funcionarios_migrados
+        self.salvar_dados_funcionarios()
+        log_debug(f"Migração concluída. {len(self.dados_funcionarios)} funcionários salvos em 'funcionarios.json'.")
+
     # --- UI HELPERS ---
+    def update_slider_label(self, value):
+        self.lbl_slider_value.configure(text=f"{value:.2f}")
+
     def create_section_label(self, parent, text):
         ctk.CTkLabel(parent, text=text, font=("Arial", 11, "bold"), text_color=COLOR_TEXT_DIM).pack(anchor="w", padx=20, pady=(0, 5))
 
     def log_tela(self, msg):
+        self.txt_log.configure(state="normal")
         self.txt_log.insert("end", f"> {msg}\n"); self.txt_log.see("end")
+        self.txt_log.configure(state="disabled")
 
     def selecionar_zip(self):
         init_dir = self.config.get('last_dir', '/')
@@ -710,6 +1245,11 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
             resumo_global = {}
             meta_diaria = timedelta(hours=7, minutes=30)
 
+            if not data:
+                c.drawString(50, h - 50, "Nenhum dado para gerar o relatório.")
+                c.save()
+                return
+
             is_report_data = 'Entrada' in data[0]
 
             if not is_report_data:
@@ -837,13 +1377,17 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             self.gerar_pdf(filepath, self.dados_consolidados)
             messagebox.showinfo("Sucesso", "PDF Gerado!")
-            os.startfile(filepath)
+            self.tabview.set(" 📊 Relatórios ") # Muda para a aba de relatórios
+            # Tenta abrir o arquivo (pode não funcionar em todos os sistemas)
+            try:
+                if os.name == 'nt': # Windows
+                    os.startfile(filepath)
+                elif os.name == 'posix': # macOS, Linux
+                    subprocess.call(('open', filepath) if sys.platform == 'darwin' else ('xdg-open', filepath))
+            except:
+                pass # Não faz nada se não conseguir abrir
         except Exception as e:
             messagebox.showerror("Erro PDF", str(e))
-
-    def restaurar_botoes(self):
-        self.btn_iniciar.configure(state="normal"); self.btn_parar.configure(state="disabled")
-        self.progress['value'] = 0; self.lbl_status_txt.configure(text="Pronto.")
 
 if __name__ == "__main__":
     app = AppPonto()
