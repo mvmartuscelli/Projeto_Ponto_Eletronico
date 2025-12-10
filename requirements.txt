@@ -1,0 +1,10 @@
+customtkinter
+tkinterdnd2
+tkcalendar
+Pillow
+face_recognition
+gspread
+oauth2client
+numpy
+reportlab
+openpyxl
