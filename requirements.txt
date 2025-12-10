@@ -1,0 +1,9 @@
+customtkinter
+tkinterdnd2
+tkcalendar
+Pillow
+face_recognition
+gspread
+numpy
+reportlab
+google-auth
