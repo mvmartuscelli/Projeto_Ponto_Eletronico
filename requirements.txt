@@ -8,3 +8,4 @@ oauth2client
 numpy
 reportlab
 openpyxl
+cairosvg

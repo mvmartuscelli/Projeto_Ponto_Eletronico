@@ -12,6 +12,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import time
 import re
+import io
 import threading
 import queue
 import traceback
@@ -29,20 +30,50 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 import csv
 from openpyxl import Workbook
+from cairosvg import svg2png
 
-# --- CONFIGURAÇÃO VISUAL ---
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("green")
+# --- FUNÇÃO PARA CARREGAR ÍCONES ---
+def load_icon(name, theme):
+    color = THEMES[theme]["COLOR_TEXT_MAIN"]
+    try:
+        with open(f"assets/{name}.svg", "r") as f:
+            svg_data = f.read()
 
-COLOR_BG = "#0a0a0a"
-COLOR_CARD = "#0f172a"
-COLOR_BORDER = "#1e293b"
-COLOR_TEXT_MAIN = "#f8fafc"
-COLOR_TEXT_DIM = "#94a3b8"
-COLOR_ACCENT = "#10b981"
-COLOR_BTN_HOVER = "#059669"
-COLOR_DANGER = "#ef4444"
-COLOR_INFO = "#3b82f6"
+        # Substitui a cor do ícone
+        svg_data = svg_data.replace('stroke="currentColor"', f'stroke="{color}"')
+
+        png_data = svg2png(bytestring=svg_data.encode('utf-8'))
+
+        return ctk.CTkImage(Image.open(io.BytesIO(png_data)), size=(24, 24))
+    except Exception as e:
+        log_debug(f"Erro ao carregar ícone {name}: {e}")
+        return None
+
+# --- CONFIGURAÇÃO DE TEMAS ---
+THEMES = {
+    "Noturno": {
+        "COLOR_BG": "#0B1120", # Azul Oxford
+        "COLOR_CARD": "#1e293b",
+        "COLOR_BORDER": "#334155",
+        "COLOR_TEXT_MAIN": "#f1f5f9", # Branco Acinzentado/Bege
+        "COLOR_TEXT_DIM": "#94a3b8",
+        "COLOR_ACCENT": "#facc15", # Amarelo Estrela
+        "COLOR_BTN_HOVER": "#eab308",
+        "COLOR_DANGER": "#ef4444",
+        "COLOR_INFO": "#3b82f6"
+    },
+    "Diurno": {
+        "COLOR_BG": "#f8fafc", # Branco Nuvem
+        "COLOR_CARD": "#ffffff",
+        "COLOR_BORDER": "#e2e8f0",
+        "COLOR_TEXT_MAIN": "#0f172a",
+        "COLOR_TEXT_DIM": "#64748b",
+        "COLOR_ACCENT": "#0ea5e9", # Azul Oceano
+        "COLOR_BTN_HOVER": "#0284c7",
+        "COLOR_DANGER": "#dc2626",
+        "COLOR_INFO": "#2563eb"
+    }
+}
 
 # LOG
 logging.basicConfig(filename='log_debug.txt', level=logging.DEBUG, format='%(asctime)s - %(message)s', filemode='w')
@@ -334,7 +365,9 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
 
         self.title("Sistema Ponto Neural v16.2 - Estável")
         self.geometry("1200x850")
-        self.configure(fg_color=COLOR_BG)
+
+        self.current_theme = "Noturno"
+        self.configure(fg_color=self._get_color("COLOR_BG"))
 
         # Tenta carregar o ícone (se existir)
         try:
@@ -359,221 +392,281 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         self.caminho_zip = ""
         self.conhecidos_nom = []
 
-        # --- ABAS ---
-        self.tabview = ctk.CTkTabview(self, fg_color="transparent")
-        self.tabview.pack(fill="both", expand=True, padx=20, pady=10)
+        # --- HEADER ---
+        self.header = ctk.CTkFrame(self, height=60, fg_color="transparent")
+        self.header.pack(fill="x", padx=20, pady=(10, 0))
+        self.header.grid_columnconfigure(0, weight=1)
 
-        self.tab_process = self.tabview.add(" 🚀 Processamento ")
-        self.tab_func = self.tabview.add(" 👥 Funcionários ")
-        self.tab_relatorios = self.tabview.add(" 📊 Relatórios ")
+        self.lbl_title = ctk.CTkLabel(self.header, text="Sistema Ponto Neural", font=("Roboto Medium", 24))
+        self.lbl_title.grid(row=0, column=0, sticky="w", padx=10)
 
-        self.setup_tab_processamento()
-        self.setup_tab_funcionarios()
-        self.setup_tab_relatorios()
+        frame_switch = ctk.CTkFrame(self.header, fg_color="transparent")
+        frame_switch.grid(row=0, column=1, sticky="e")
 
-    # ==========================================
-    # ABA 1: PROCESSAMENTO
-    # ==========================================
-    def setup_tab_processamento(self):
-        frame = self.tab_process
-        frame.grid_columnconfigure(0, weight=4)
-        frame.grid_columnconfigure(1, weight=5)
-        frame.grid_rowconfigure(0, weight=1)
+        self.theme_switch = ctk.CTkSwitch(frame_switch, text="Tema Claro", command=self._toggle_theme)
+        self.theme_switch.pack(side="left", padx=10)
 
-        # HEADER
-        lbl_title = ctk.CTkLabel(frame, text="Painel de Controle", font=("Roboto Medium", 24), text_color="white")
-        lbl_title.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=10)
+        # --- LAYOUT PRINCIPAL ---
+        self.main_container = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_container.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        self.main_container.grid_columnconfigure(1, weight=1)
+        self.main_container.grid_rowconfigure(0, weight=1)
+
+        # --- BARRA DE NAVEGAÇÃO ---
+        self.nav_frame = ctk.CTkFrame(self.main_container, width=200, corner_radius=15)
+        self.nav_frame.grid(row=0, column=0, sticky="nsw", padx=(0, 10))
+
+        self.nav_buttons = {}
+        self.frames = {}
+        self.icons = {}
+
+        # --- CONTEÚDO PRINCIPAL ---
+        self.content_frame = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.content_frame.grid(row=0, column=1, sticky="nsew")
+
+        for F, name, icon_name in zip(
+            (AbaProcessamento, AbaFuncionarios, AbaRelatorios),
+            ("Processamento", "Funcionários", "Relatórios"),
+            ("rocket", "users", "clipboard-list")
+        ):
+            frame = F(self.content_frame, self)
+            self.frames[name] = frame
+            frame.grid(row=0, column=0, sticky="nsew")
+
+            button = ctk.CTkButton(
+                self.nav_frame,
+                text=f" {name}",
+                anchor="w",
+                height=50,
+                corner_radius=8,
+                command=lambda n=name: self.select_frame_by_name(n),
+                compound="left"
+            )
+            button.pack(fill="x", padx=10, pady=5)
+            self.nav_buttons[name] = button
+
+        self.select_frame_by_name("Processamento")
+        self._apply_theme()
+
+# ===================================================================
+# --- CLASSES DAS ABAS ---
+# ===================================================================
+
+class AbaProcessamento(ctk.CTkFrame):
+    def __init__(self, master, app_ref):
+        super().__init__(master, fg_color="transparent")
+        self.app = app_ref
+        self.pack(fill="both", expand=True)
+
+        self.grid_columnconfigure(0, weight=4)
+        self.grid_columnconfigure(1, weight=5)
+        self.grid_rowconfigure(1, weight=1)
 
         # ESQUERDA
-        frame_left = ctk.CTkFrame(frame, fg_color=COLOR_CARD, corner_radius=15, border_color=COLOR_BORDER, border_width=1)
-        frame_left.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=10)
+        self.frame_left = ctk.CTkFrame(self, corner_radius=15, border_width=1)
+        self.frame_left.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=10)
 
         # Datas
-        self.create_section_label(frame_left, "1. PERÍODO")
-        frame_datas = ctk.CTkFrame(frame_left, fg_color="transparent")
-        frame_datas.pack(fill="x", padx=20)
+        self.app.create_section_label(self.frame_left, "1. PERÍODO")
+        self.frame_datas = ctk.CTkFrame(self.frame_left, fg_color="transparent")
+        self.frame_datas.pack(fill="x", padx=20)
 
         style_cal = {'background': '#1e293b', 'foreground': 'white', 'borderwidth': 0, 'date_pattern': 'dd/mm/yyyy'}
 
-        ctk.CTkLabel(frame_datas, text="De:", text_color=COLOR_TEXT_DIM).grid(row=0, column=0, sticky="w")
-        self.cal_inicio = DateEntry(frame_datas, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
-        self.cal_inicio.set_date(datetime.date.today().replace(day=1))
-        self.cal_inicio.grid(row=1, column=0, padx=5, pady=5)
+        self.lbl_de = ctk.CTkLabel(self.frame_datas, text="De:")
+        self.lbl_de.grid(row=0, column=0, sticky="w")
+        self.app.cal_inicio = DateEntry(self.frame_datas, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
+        self.app.cal_inicio.set_date(datetime.date.today().replace(day=1))
+        self.app.cal_inicio.grid(row=1, column=0, padx=5, pady=5)
 
-        ctk.CTkLabel(frame_datas, text="Até:", text_color=COLOR_TEXT_DIM).grid(row=0, column=1, sticky="w")
-        self.cal_fim = DateEntry(frame_datas, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
-        self.cal_fim.set_date(datetime.date.today())
-        self.cal_fim.grid(row=1, column=1, padx=5, pady=5)
+        self.lbl_ate = ctk.CTkLabel(self.frame_datas, text="Até:")
+        self.lbl_ate.grid(row=0, column=1, sticky="w")
+        self.app.cal_fim = DateEntry(self.frame_datas, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
+        self.app.cal_fim.set_date(datetime.date.today())
+        self.app.cal_fim.grid(row=1, column=1, padx=5, pady=5)
 
         # Slider
-        ctk.CTkFrame(frame_left, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=20, pady=20)
-        self.create_section_label(frame_left, "2. SENSIBILIDADE")
+        self.separator1 = ctk.CTkFrame(self.frame_left, height=1)
+        self.separator1.pack(fill="x", padx=20, pady=20)
+        self.app.create_section_label(self.frame_left, "2. SENSIBILIDADE")
 
-        frame_slider = ctk.CTkFrame(frame_left, fg_color="transparent")
-        frame_slider.pack(fill="x", padx=20, pady=5)
-        frame_slider.grid_columnconfigure(0, weight=1)
+        self.frame_slider = ctk.CTkFrame(self.frame_left, fg_color="transparent")
+        self.frame_slider.pack(fill="x", padx=20, pady=5)
+        self.frame_slider.grid_columnconfigure(0, weight=1)
 
-        self.slider = ctk.CTkSlider(frame_slider, from_=0.35, to=0.60, number_of_steps=25, progress_color=COLOR_ACCENT, command=self.update_slider_label)
-        self.slider.set(self.config.get('tolerancia', 0.45))
-        self.slider.grid(row=0, column=0, sticky="ew", padx=(5, 15))
+        self.app.slider = ctk.CTkSlider(self.frame_slider, from_=0.35, to=0.60, number_of_steps=25, command=self.app.update_slider_label)
+        self.app.slider.set(self.app.config.get('tolerancia', 0.45))
+        self.app.slider.grid(row=0, column=0, sticky="ew", padx=(5, 15))
 
-        self.lbl_slider_value = ctk.CTkLabel(frame_slider, text=f"{self.slider.get():.2f}", font=("Consolas", 12), text_color=COLOR_TEXT_DIM, width=40)
-        self.lbl_slider_value.grid(row=0, column=1)
+        self.app.lbl_slider_value = ctk.CTkLabel(self.frame_slider, text=f"{self.app.slider.get():.2f}", font=("Consolas", 12), width=40)
+        self.app.lbl_slider_value.grid(row=0, column=1)
 
         # Arquivo (Drag & Drop)
-        ctk.CTkFrame(frame_left, height=1, fg_color=COLOR_BORDER).pack(fill="x", padx=20, pady=20)
-        self.create_section_label(frame_left, "3. ARQUIVO ZIP (Arraste aqui)")
+        self.separator2 = ctk.CTkFrame(self.frame_left, height=1)
+        self.separator2.pack(fill="x", padx=20, pady=20)
+        self.app.create_section_label(self.frame_left, "3. ARQUIVO ZIP (Arraste aqui)")
 
-        self.frame_file = ctk.CTkFrame(frame_left, fg_color="#1e293b", corner_radius=8, border_width=2, border_color="#334155")
-        self.frame_file.pack(fill="x", padx=20, pady=5, ipady=10)
+        self.app.frame_file = ctk.CTkFrame(self.frame_left, corner_radius=8, border_width=2)
+        self.app.frame_file.pack(fill="x", padx=20, pady=5, ipady=10)
 
-        # Registro DND
-        self.frame_file.drop_target_register(DND_FILES)
-        self.frame_file.dnd_bind('<<Drop>>', self.drop_file)
+        self.app.frame_file.drop_target_register(DND_FILES)
+        self.app.frame_file.dnd_bind('<<Drop>>', self.app.drop_file)
 
-        self.lbl_arquivo = ctk.CTkLabel(self.frame_file, text="Arraste o ZIP ou clique na pasta", text_color=COLOR_TEXT_DIM, font=("Consolas", 11))
-        self.lbl_arquivo.pack(side="left", padx=10, pady=10)
+        self.app.lbl_arquivo = ctk.CTkLabel(self.app.frame_file, text="Arraste o ZIP ou clique na pasta", font=("Consolas", 11))
+        self.app.lbl_arquivo.pack(side="left", padx=10, pady=10)
 
-        self.btn_select = ctk.CTkButton(self.frame_file, text="📂", width=40, fg_color=COLOR_INFO, command=self.selecionar_zip)
+        self.btn_select = ctk.CTkButton(self.app.frame_file, text="📂", width=40, command=self.app.selecionar_zip)
         self.btn_select.pack(side="right", padx=10)
 
         # Ações
-        frame_actions = ctk.CTkFrame(frame_left, fg_color="transparent")
-        frame_actions.pack(side="bottom", fill="x", padx=20, pady=30)
-        self.btn_iniciar = ctk.CTkButton(frame_actions, text="INICIAR", height=50, font=("Arial", 14, "bold"), fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.iniciar_thread)
-        self.btn_iniciar.pack(fill="x", pady=(0, 10))
-        self.btn_pdf = ctk.CTkButton(frame_actions, text="GERAR RELATÓRIO PDF", height=40, fg_color="transparent", border_width=1, border_color=COLOR_BORDER, state="disabled", command=self.gerar_pdf_acao_wrapper)
-        self.btn_pdf.pack(fill="x")
+        self.frame_actions = ctk.CTkFrame(self.frame_left, fg_color="transparent")
+        self.frame_actions.pack(side="bottom", fill="x", padx=20, pady=30)
+        self.app.btn_iniciar = ctk.CTkButton(self.frame_actions, text="INICIAR", height=50, font=("Arial", 14, "bold"), command=self.app.iniciar_thread)
+        self.app.btn_iniciar.pack(fill="x", pady=(0, 10))
+        self.app.btn_pdf = ctk.CTkButton(self.frame_actions, text="GERAR RELATÓRIO PDF", height=40, fg_color="transparent", border_width=1, state="disabled", command=self.app.gerar_pdf_acao_wrapper)
+        self.app.btn_pdf.pack(fill="x")
 
         # DIREITA
-        frame_right = ctk.CTkFrame(frame, fg_color="transparent")
-        frame_right.grid(row=1, column=1, sticky="nsew", padx=(10, 0), pady=10)
+        self.frame_right = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_right.grid(row=0, column=1, sticky="nsew", padx=(10, 0), pady=10)
+        self.frame_right.grid_rowconfigure(1, weight=1)
 
-        self.card_status = ctk.CTkFrame(frame_right, fg_color=COLOR_CARD, corner_radius=15, border_color=COLOR_BORDER, border_width=1)
-        self.card_status.pack(fill="x", pady=(0, 15))
-        ctk.CTkLabel(self.card_status, text="STATUS", font=("Arial", 11, "bold"), text_color=COLOR_TEXT_DIM).pack(anchor="w", padx=20, pady=(15, 5))
-        self.progress_bar = ctk.CTkProgressBar(self.card_status, height=10, progress_color=COLOR_ACCENT)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x", padx=20, pady=5)
-        self.lbl_status_txt = ctk.CTkLabel(self.card_status, text="Pronto.", text_color=COLOR_ACCENT)
-        self.lbl_status_txt.pack(side="left", padx=20, pady=(0, 15))
-        self.lbl_estimativa = ctk.CTkLabel(self.card_status, text="--:--", text_color=COLOR_TEXT_DIM)
-        self.lbl_estimativa.pack(side="right", padx=20, pady=(0, 15))
+        self.card_status = ctk.CTkFrame(self.frame_right, corner_radius=15, border_width=1)
+        self.card_status.grid(row=0, column=0, sticky="ew")
 
-        self.txt_log = ctk.CTkTextbox(frame_right, fg_color="black", text_color="#22c55e", font=("Consolas", 11), corner_radius=10)
-        self.txt_log.pack(fill="both", expand=True)
-        self.txt_log.configure(state="disabled")
-        self.btn_parar = ctk.CTkButton(frame_right, text="PARAR", fg_color="#450a0a", text_color=COLOR_DANGER, width=80, state="disabled", command=self.solicitar_parada)
-        self.btn_parar.place(relx=1.0, rely=0.0, anchor="ne", x=0, y=-40)
+        self.lbl_status_title = ctk.CTkLabel(self.card_status, text="STATUS", font=("Arial", 11, "bold"))
+        self.lbl_status_title.pack(anchor="w", padx=20, pady=(15, 5))
+        self.app.progress_bar = ctk.CTkProgressBar(self.card_status, height=10)
+        self.app.progress_bar.set(0)
+        self.app.progress_bar.pack(fill="x", padx=20, pady=5)
+        self.app.lbl_status_txt = ctk.CTkLabel(self.card_status, text="Pronto.")
+        self.app.lbl_status_txt.pack(side="left", padx=20, pady=(0, 15))
+        self.app.lbl_estimativa = ctk.CTkLabel(self.card_status, text="--:--")
+        self.app.lbl_estimativa.pack(side="right", padx=20, pady=(0, 15))
 
-    # ==========================================
-    # ABA 2: GESTÃO DE FUNCIONÁRIOS
-    # ==========================================
-    def setup_tab_funcionarios(self):
-        frame = self.tab_func
+        self.app.txt_log = ctk.CTkTextbox(self.frame_right, font=("Consolas", 11), corner_radius=10)
+        self.app.txt_log.grid(row=1, column=0, sticky="nsew", pady=(15,0))
+        self.app.txt_log.configure(state="disabled")
+
+        self.app.btn_parar = ctk.CTkButton(self.app.header, text="PARAR", width=80, state="disabled", command=self.app.solicitar_parada)
+
+class AbaFuncionarios(ctk.CTkFrame):
+    def __init__(self, master, app_ref):
+        super().__init__(master, fg_color="transparent")
+        self.app = app_ref
+        self.pack(fill="both", expand=True)
 
         # --- Toolbar Superior ---
-        toolbar = ctk.CTkFrame(frame, fg_color="transparent", height=50)
-        toolbar.pack(fill="x", padx=10, pady=10)
+        self.toolbar = ctk.CTkFrame(self, fg_color="transparent", height=50)
+        self.toolbar.pack(fill="x", padx=10, pady=10)
 
-        ctk.CTkButton(toolbar, text="+ Adicionar Novo", fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.add_funcionario).pack(side="left")
-        ctk.CTkButton(toolbar, text="🔄 Recarregar", fg_color=COLOR_INFO, width=100, command=self.carregar_lista_funcionarios).pack(side="left", padx=10)
+        self.btn_add = ctk.CTkButton(self.toolbar, text="+ Adicionar Novo", command=self.app.add_funcionario)
+        self.btn_add.pack(side="left")
+        self.btn_reload = ctk.CTkButton(self.toolbar, text="🔄 Recarregar", width=100, command=self.app.carregar_lista_funcionarios)
+        self.btn_reload.pack(side="left", padx=10)
 
         # --- Frame de Filtros ---
-        filter_frame = ctk.CTkFrame(frame, fg_color=COLOR_CARD, border_width=1, border_color=COLOR_BORDER)
-        filter_frame.pack(fill="x", padx=10, pady=(0, 10), ipady=10)
+        self.filter_frame = ctk.CTkFrame(self, border_width=1)
+        self.filter_frame.pack(fill="x", padx=10, pady=(0, 10), ipady=10)
 
-        ctk.CTkLabel(filter_frame, text="Filtrar por nome:").pack(side="left", padx=(15, 5))
-        self.filtro_nome = ctk.CTkEntry(filter_frame, placeholder_text="Digite um nome...")
-        self.filtro_nome.pack(side="left", padx=5, fill="x", expand=True)
-        self.filtro_nome.bind("<KeyRelease>", lambda e: self.carregar_lista_funcionarios())
+        self.lbl_filter_name = ctk.CTkLabel(self.filter_frame, text="Filtrar por nome:")
+        self.lbl_filter_name.pack(side="left", padx=(15, 5))
+        self.app.filtro_nome = ctk.CTkEntry(self.filter_frame, placeholder_text="Digite um nome...")
+        self.app.filtro_nome.pack(side="left", padx=5, fill="x", expand=True)
+        self.app.filtro_nome.bind("<KeyRelease>", lambda e: self.app.carregar_lista_funcionarios())
 
-        ctk.CTkLabel(filter_frame, text="Ordenar por:").pack(side="left", padx=(15, 5))
-        self.filtro_ordem_campo = ctk.CTkComboBox(filter_frame, values=["Nome", "Data de Admissão", "Salário"], command=lambda e: self.carregar_lista_funcionarios())
-        self.filtro_ordem_campo.set("Nome")
-        self.filtro_ordem_campo.pack(side="left", padx=5)
+        self.lbl_sort_by = ctk.CTkLabel(self.filter_frame, text="Ordenar por:")
+        self.lbl_sort_by.pack(side="left", padx=(15, 5))
+        self.app.filtro_ordem_campo = ctk.CTkComboBox(self.filter_frame, values=["Nome", "Data de Admissão", "Salário"], command=lambda e: self.app.carregar_lista_funcionarios())
+        self.app.filtro_ordem_campo.set("Nome")
+        self.app.filtro_ordem_campo.pack(side="left", padx=5)
 
-        self.filtro_ordem_dir = ctk.CTkComboBox(filter_frame, values=["Crescente", "Decrescente"], width=120, command=lambda e: self.carregar_lista_funcionarios())
-        self.filtro_ordem_dir.set("Crescente")
-        self.filtro_ordem_dir.pack(side="left", padx=5)
+        self.app.filtro_ordem_dir = ctk.CTkComboBox(self.filter_frame, values=["Crescente", "Decrescente"], width=120, command=lambda e: self.app.carregar_lista_funcionarios())
+        self.app.filtro_ordem_dir.set("Crescente")
+        self.app.filtro_ordem_dir.pack(side="left", padx=5)
 
-        self.scroll_func = ctk.CTkScrollableFrame(frame, fg_color="transparent")
-        self.scroll_func.pack(fill="both", expand=True, padx=10, pady=5)
+        self.app.scroll_func = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.app.scroll_func.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self.carregar_lista_funcionarios()
+        self.app.carregar_lista_funcionarios()
 
-    # ==========================================
-    # ABA 3: RELATÓRIOS
-    # ==========================================
-    def setup_tab_relatorios(self):
-        frame = self.tab_relatorios
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(1, weight=1)
+class AbaRelatorios(ctk.CTkFrame):
+    def __init__(self, master, app_ref):
+        super().__init__(master, fg_color="transparent")
+        self.app = app_ref
+        self.pack(fill="both", expand=True)
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
         # Frame dos Controles
-        frame_controles = ctk.CTkFrame(frame, fg_color=COLOR_CARD, corner_radius=15, border_color=COLOR_BORDER, border_width=1)
-        frame_controles.grid(row=0, column=0, sticky="new", padx=10, pady=10)
+        self.frame_controles = ctk.CTkFrame(self, corner_radius=15, border_width=1)
+        self.frame_controles.grid(row=0, column=0, sticky="new", padx=10, pady=10)
 
         # Seção de Filtros
-        self.create_section_label(frame_controles, "FILTROS")
+        self.app.create_section_label(self.frame_controles, "FILTROS")
 
         # Frame para os filtros
-        frame_filtros = ctk.CTkFrame(frame_controles, fg_color="transparent")
-        frame_filtros.pack(fill="x", padx=20, pady=10)
+        self.frame_filtros = ctk.CTkFrame(self.frame_controles, fg_color="transparent")
+        self.frame_filtros.pack(fill="x", padx=20, pady=10)
 
         # Filtro de Data
-        ctk.CTkLabel(frame_filtros, text="Período:", text_color=COLOR_TEXT_DIM).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.lbl_periodo = ctk.CTkLabel(self.frame_filtros, text="Período:")
+        self.lbl_periodo.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
         style_cal = {'background': '#1e293b', 'foreground': 'white', 'borderwidth': 0, 'date_pattern': 'dd/mm/yyyy'}
 
-        self.cal_relatorio_inicio = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
-        self.cal_relatorio_inicio.set_date(datetime.date.today().replace(day=1))
-        self.cal_relatorio_inicio.grid(row=0, column=1, padx=5)
+        self.app.cal_relatorio_inicio = DateEntry(self.frame_filtros, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
+        self.app.cal_relatorio_inicio.set_date(datetime.date.today().replace(day=1))
+        self.app.cal_relatorio_inicio.grid(row=0, column=1, padx=5)
 
-        ctk.CTkLabel(frame_filtros, text="até", text_color=COLOR_TEXT_DIM).grid(row=0, column=2, padx=5)
+        self.lbl_ate = ctk.CTkLabel(self.frame_filtros, text="até")
+        self.lbl_ate.grid(row=0, column=2, padx=5)
 
-        self.cal_relatorio_fim = DateEntry(frame_filtros, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
-        self.cal_relatorio_fim.set_date(datetime.date.today())
-        self.cal_relatorio_fim.grid(row=0, column=3, padx=5)
+        self.app.cal_relatorio_fim = DateEntry(self.frame_filtros, width=12, font=("Arial", 11), **style_cal, locale='pt_BR')
+        self.app.cal_relatorio_fim.set_date(datetime.date.today())
+        self.app.cal_relatorio_fim.grid(row=0, column=3, padx=5)
 
         # Filtro de Funcionário
-        ctk.CTkLabel(frame_filtros, text="Funcionário:", text_color=COLOR_TEXT_DIM).grid(row=0, column=4, sticky="w", padx=(20, 10))
+        self.lbl_funcionario = ctk.CTkLabel(self.frame_filtros, text="Funcionário:")
+        self.lbl_funcionario.grid(row=0, column=4, sticky="w", padx=(20, 10))
 
-        self.funcionarios_selecionados = ["Todos"]
-        self.combo_funcionarios = ctk.CTkComboBox(frame_filtros, values=["Todos", "Personalizar..."], width=200, command=self.on_selecionar_funcionario)
-        self.combo_funcionarios.set("Todos")
-        self.combo_funcionarios.grid(row=0, column=5, padx=5)
+        self.app.funcionarios_selecionados = ["Todos"]
+        self.app.combo_funcionarios = ctk.CTkComboBox(self.frame_filtros, values=["Todos", "Personalizar..."], width=200, command=self.app.on_selecionar_funcionario)
+        self.app.combo_funcionarios.set("Todos")
+        self.app.combo_funcionarios.grid(row=0, column=5, padx=5)
 
-        self.tab_relatorios.bind("<<TabSelected>>", self.atualizar_lista_funcionarios_relatorio)
+        self.app.frames["Relatorios"].bind("<<Map>>", self.app.atualizar_lista_funcionarios_relatorio)
 
         # Botão para Gerar Relatório
-        self.btn_gerar_relatorio = ctk.CTkButton(frame_controles, text="Gerar Relatório", fg_color=COLOR_ACCENT, hover_color=COLOR_BTN_HOVER, command=self.gerar_relatorio)
+        self.btn_gerar_relatorio = ctk.CTkButton(self.frame_controles, text="Gerar Relatório", command=self.app.gerar_relatorio)
         self.btn_gerar_relatorio.pack(pady=(10, 20))
 
         # Área de Preview do Relatório
-        self.txt_relatorio = ctk.CTkTextbox(frame, fg_color="black", text_color="#22c55e", font=("Consolas", 11), corner_radius=10)
-        self.txt_relatorio.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        self.txt_relatorio.configure(state="disabled")
+        self.app.txt_relatorio = ctk.CTkTextbox(self, font=("Consolas", 11), corner_radius=10)
+        self.app.txt_relatorio.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.app.txt_relatorio.configure(state="disabled")
 
         # Frame para os botões de exportação
-        frame_export = ctk.CTkFrame(frame, fg_color="transparent")
-        frame_export.grid(row=2, column=0, sticky="e", padx=10, pady=10)
+        self.frame_export = ctk.CTkFrame(self, fg_color="transparent")
+        self.frame_export.grid(row=2, column=0, sticky="e", padx=10, pady=10)
 
-        self.btn_export_csv = ctk.CTkButton(frame_export, text="Exportar CSV", state="disabled", command=self.exportar_csv)
-        self.btn_export_csv.pack(side="left", padx=5)
+        self.app.btn_export_csv = ctk.CTkButton(self.frame_export, text="Exportar CSV", state="disabled", command=self.app.exportar_csv)
+        self.app.btn_export_csv.pack(side="left", padx=5)
 
-        self.btn_export_excel = ctk.CTkButton(frame_export, text="Exportar Excel", state="disabled", command=self.exportar_excel)
-        self.btn_export_excel.pack(side="left", padx=5)
+        self.app.btn_export_excel = ctk.CTkButton(self.frame_export, text="Exportar Excel", state="disabled", command=self.app.exportar_excel)
+        self.app.btn_export_excel.pack(side="left", padx=5)
 
-        self.btn_export_pdf = ctk.CTkButton(frame_export, text="Exportar PDF", state="disabled", command=self.exportar_pdf)
-        self.btn_export_pdf.pack(side="left", padx=5)
+        self.app.btn_export_pdf = ctk.CTkButton(self.frame_export, text="Exportar PDF", state="disabled", command=self.app.exportar_pdf)
+        self.app.btn_export_pdf.pack(side="left", padx=5)
 
         # --- Histórico de Relatórios ---
-        ctk.CTkLabel(frame, text="HISTÓRICO DE RELATÓRIOS GERADOS", font=("Arial", 11, "bold"), text_color=COLOR_TEXT_DIM).grid(row=3, column=0, sticky="w", padx=10, pady=(10,0))
-        self.scroll_historico = ctk.CTkScrollableFrame(frame, height=150, fg_color=COLOR_CARD)
-        self.scroll_historico.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
-        self.lbl_historico_vazio = ctk.CTkLabel(self.scroll_historico, text="Nenhum relatório gerado nesta sessão.", text_color=COLOR_TEXT_DIM)
-        self.lbl_historico_vazio.pack(pady=20)
+        self.lbl_hist_title = ctk.CTkLabel(self, text="HISTÓRICO DE RELATÓRIOS GERADOS", font=("Arial", 11, "bold"))
+        self.lbl_hist_title.grid(row=3, column=0, sticky="w", padx=10, pady=(10,0))
+        self.app.scroll_historico = ctk.CTkScrollableFrame(self, height=150)
+        self.app.scroll_historico.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 10))
+        self.app.lbl_historico_vazio = ctk.CTkLabel(self.app.scroll_historico, text="Nenhum relatório gerado nesta sessão.")
+        self.app.lbl_historico_vazio.pack(pady=20)
 
     def on_selecionar_funcionario(self, choice):
         if choice == "Personalizar...":
@@ -1377,7 +1470,7 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             self.gerar_pdf(filepath, self.dados_consolidados)
             messagebox.showinfo("Sucesso", "PDF Gerado!")
-            self.tabview.set(" 📊 Relatórios ") # Muda para a aba de relatórios
+            self.select_frame_by_name("Relatórios") # Muda para a aba de relatórios
             # Tenta abrir o arquivo (pode não funcionar em todos os sistemas)
             try:
                 if os.name == 'nt': # Windows
@@ -1388,6 +1481,117 @@ class AppPonto(ctk.CTk, TkinterDnD.DnDWrapper):
                 pass # Não faz nada se não conseguir abrir
         except Exception as e:
             messagebox.showerror("Erro PDF", str(e))
+
+    def _get_color(self, color_name):
+        return THEMES[self.current_theme][color_name]
+
+    def _toggle_theme(self):
+        self.current_theme = "Diurno" if self.current_theme == "Noturno" else "Noturno"
+        self._apply_theme()
+
+    def _apply_theme(self):
+        """Aplica as cores do tema atual a todos os widgets da aplicação."""
+
+        # Cores
+        bg_color = self._get_color("COLOR_BG")
+        card_color = self._get_color("COLOR_CARD")
+        border_color = self._get_color("COLOR_BORDER")
+        text_main_color = self._get_color("COLOR_TEXT_MAIN")
+        text_dim_color = self._get_color("COLOR_TEXT_DIM")
+        accent_color = self._get_color("COLOR_ACCENT")
+        accent_hover_color = self._get_color("COLOR_BTN_HOVER")
+        info_color = self._get_color("COLOR_INFO")
+        danger_color = self._get_color("COLOR_DANGER")
+
+        # Janela Principal
+        self.configure(fg_color=bg_color)
+
+        # Header
+        self.header.configure(fg_color=bg_color)
+        self.lbl_title.configure(text_color=text_main_color)
+
+        # --- ÍCONES ---
+        self.icons["Processamento"] = load_icon("rocket", self.current_theme)
+        self.icons["Funcionários"] = load_icon("users", self.current_theme)
+        self.icons["Relatórios"] = load_icon("clipboard-list", self.current_theme)
+
+        for name, btn in self.nav_buttons.items():
+            btn.configure(image=self.icons.get(name))
+
+        self.theme_switch.configure(
+            text="Tema Claro" if self.current_theme == "Noturno" else "Tema Escuro",
+            text_color=text_dim_color,
+            button_color=accent_color,
+            progress_color=card_color,
+            button_hover_color=accent_hover_color
+        )
+        self.btn_parar.configure(fg_color=danger_color, text_color=text_main_color, hover_color="#B91C1C")
+        self.btn_parar.grid(row=0, column=2, sticky="e", padx=10)
+
+        # --- NAVEGAÇÃO ---
+        self.nav_frame.configure(fg_color=card_color)
+        self.select_frame_by_name(self.selected_frame_name) # Re-aplica o estilo do botão ativo
+
+        # --- FRAMES DE CONTEÚDO ---
+        for frame in self.frames.values():
+            if isinstance(frame, (AbaProcessamento, AbaFuncionarios, AbaRelatorios)):
+                frame.configure(fg_color=bg_color)
+
+        # --- Aba de Processamento ---
+        aba_proc = self.frames["Processamento"]
+        aba_proc.configure(fg_color=bg_color)
+        aba_proc.frame_left.configure(fg_color=card_color, border_color=border_color)
+        aba_proc.lbl_de.configure(text_color=text_dim_color)
+        aba_proc.lbl_ate.configure(text_color=text_dim_color)
+        aba_proc.separator1.configure(fg_color=border_color)
+        aba_proc.separator2.configure(fg_color=border_color)
+        self.slider.configure(progress_color=accent_color, button_color=accent_color, button_hover_color=accent_hover_color)
+        self.lbl_slider_value.configure(text_color=text_dim_color)
+        self.frame_file.configure(border_color=border_color, fg_color=bg_color)
+        self.lbl_arquivo.configure(text_color=text_dim_color)
+        aba_proc.btn_select.configure(fg_color=info_color, text_color=text_main_color)
+        self.btn_iniciar.configure(fg_color=accent_color, hover_color=accent_hover_color, text_color=self._get_color("COLOR_TEXT_MAIN") if self.current_theme == 'Diurno' else '#000000')
+        self.btn_pdf.configure(border_color=border_color, text_color=text_dim_color)
+
+        aba_proc.frame_right.configure(fg_color=bg_color)
+        aba_proc.card_status.configure(fg_color=card_color, border_color=border_color)
+        aba_proc.lbl_status_title.configure(text_color=text_dim_color)
+        self.progress_bar.configure(progress_color=accent_color)
+        self.lbl_status_txt.configure(text_color=accent_color)
+        self.lbl_estimativa.configure(text_color=text_dim_color)
+        self.txt_log.configure(fg_color=bg_color, text_color="#22c55e" if self.current_theme=="Noturno" else "#16a34a", border_color=border_color, border_width=1)
+
+        # --- Aba de Funcionários ---
+        aba_func = self.frames["Funcionarios"]
+        aba_func.configure(fg_color=bg_color)
+        aba_func.btn_add.configure(fg_color=accent_color, hover_color=accent_hover_color, text_color=self._get_color("COLOR_TEXT_MAIN") if self.current_theme == 'Diurno' else '#000000')
+        aba_func.btn_reload.configure(fg_color=info_color, text_color=text_main_color)
+        aba_func.filter_frame.configure(fg_color=card_color, border_color=border_color)
+        aba_func.lbl_filter_name.configure(text_color=text_dim_color)
+        aba_func.lbl_sort_by.configure(text_color=text_dim_color)
+        self.filtro_nome.configure(fg_color=bg_color, border_color=border_color, text_color=text_main_color)
+        self.filtro_ordem_campo.configure(button_color=accent_color, border_color=border_color, text_color=text_main_color, dropdown_fg_color=card_color, button_hover_color=accent_hover_color)
+        self.filtro_ordem_dir.configure(button_color=accent_color, border_color=border_color, text_color=text_main_color, dropdown_fg_color=card_color, button_hover_color=accent_hover_color)
+        self.scroll_func.configure(fg_color=bg_color)
+        self.carregar_lista_funcionarios() # Recarrega para aplicar tema nos cards
+
+        # --- Aba de Relatórios ---
+        aba_rel = self.frames["Relatorios"]
+        aba_rel.configure(fg_color=bg_color)
+        aba_rel.frame_controles.configure(fg_color=card_color, border_color=border_color)
+        aba_rel.lbl_periodo.configure(text_color=text_dim_color)
+        aba_rel.lbl_ate.configure(text_color=text_dim_color)
+        aba_rel.lbl_funcionario.configure(text_color=text_dim_color)
+        self.combo_funcionarios.configure(button_color=accent_color, border_color=border_color, text_color=text_main_color, dropdown_fg_color=card_color, button_hover_color=accent_hover_color)
+        aba_rel.btn_gerar_relatorio.configure(fg_color=accent_color, hover_color=accent_hover_color, text_color=self._get_color("COLOR_TEXT_MAIN") if self.current_theme == 'Diurno' else '#000000')
+        self.txt_relatorio.configure(fg_color=bg_color, text_color=text_main_color, border_color=border_color, border_width=1)
+        self.btn_export_csv.configure(fg_color=info_color)
+        self.btn_export_excel.configure(fg_color=info_color)
+        self.btn_export_pdf.configure(fg_color=info_color)
+        aba_rel.lbl_hist_title.configure(text_color=text_dim_color)
+        self.scroll_historico.configure(fg_color=card_color)
+        self.lbl_historico_vazio.configure(text_color=text_dim_color)
+        self.atualizar_visualizacao_historico() # Recarrega para aplicar tema nos cards
 
 if __name__ == "__main__":
     app = AppPonto()
